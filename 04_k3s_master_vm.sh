@@ -57,7 +57,18 @@ fi
 
 MASTER_INTERNAL_IP=$(wait_for_fixed_ip_for_net "$MASTER_NAME" "$K3S_CLUSTER_NET_NAME")
 
-# Get the ACTUAL IP the VM has (not what OpenStack reports — DHCP may differ)
+# Ensure host-to-FIP routing (MUST happen before wait_for_ssh — FIP is unreachable without it)
+log "Ensuring host route to floating range via DevStack VM."
+sudo ip route replace "$FLOATING_RANGE" via "$VM_IP"
+
+log "Ensuring DevStack VM forwards floating range through br-ex."
+# Copy configuration script
+scp "${SSH_BASE_OPTS[@]}" -i "$VM_SSH_KEY" "$SCRIPT_DIR/configure_br_ex.sh" "${SSH_USER}@${VM_IP}:~/configure_br_ex.sh"
+
+# Execute inside the VM as admin
+vm_ssh "bash -lc 'source /home/ubuntu/devstack/openrc admin admin && bash ~/configure_br_ex.sh'"
+
+# Now the FIP is reachable — wait for SSH and detect actual IP
 wait_for_ssh "$MASTER_FIP" "$VM_SSH_KEY"
 ACTUAL_IP=$(ssh "${SSH_BASE_OPTS[@]}" -i "$VM_SSH_KEY" "${SSH_USER}@${MASTER_FIP}" \
     "ip -4 addr show eth0 | grep -oP 'inet \K[0-9.]+'" 2>/dev/null || true)
@@ -71,17 +82,6 @@ persist_env MASTER_FIP "$MASTER_FIP"
 persist_env MASTER_INTERNAL_IP "$MASTER_INTERNAL_IP"
 persist_env MASTER_SG "$MASTER_SG"
 persist_env KEYPAIR_NAME "$KEYPAIR_NAME"
-
-# Ensure host-to-FIP routing
-log "Ensuring host route to floating range via DevStack VM."
-sudo ip route replace "$FLOATING_RANGE" via "$VM_IP"
-
-log "Ensuring DevStack VM forwards floating range through br-ex."
-# Copy configuration script
-scp "${SSH_BASE_OPTS[@]}" -i "$VM_SSH_KEY" "$SCRIPT_DIR/configure_br_ex.sh" "${SSH_USER}@${VM_IP}:~/configure_br_ex.sh"
-
-# Execute inside the VM as admin
-vm_ssh "bash -lc 'source /home/ubuntu/devstack/openrc admin admin && bash ~/configure_br_ex.sh'"
 
 
 log "K3s Master VM is ready at $MASTER_FIP (Internal: $MASTER_INTERNAL_IP)."
