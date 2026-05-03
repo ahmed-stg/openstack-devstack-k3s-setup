@@ -1,0 +1,28 @@
+Note on HOST_IP: Your config includes a dynamic check for enp1s0:
+
+However, 02_init_vm.sh:57 actually performs a sed replacement on this line during initialization to hardcode the management IP found at runtime, ensuring DevStack binds to the correct interface.
+
+
+script 6 : m1.small
+image storage : cinder
+script 7 : airgap but only in a way that Download Zot binary on host, push via SCP to registry VM . not necesseraly fully offline , i just dont want to download via internet from vms, via my host from vms suits me better (scp)
+Zot has optional modules. The relevant ones for your project:
+
+    Basic storage + serve — always on
+    Web UI — one config line, lets you browse images in a browser, nice for demos
+    Search API — lets you query what images exist
+    Auth — we'll handle this in Script 09, can be disabled until then
+i'm trusting you
+
+script 8 : Option B — Script pushes a test image and confirms the worker can pull it before exiting
+
+Option A — Keystone-Native (Most OpenStack-Aligned) , im sure about this one , but the question now is why do i have zot then ?
+the option c Option C — Keystone + Zot LDAP bridge
+OpenStack Keystone can be configured to expose an LDAP interface. Zot supports LDAP auth. Wire them together.
+Pros: elegant, no custom code
+Cons: Keystone's LDAP support is read-only and complex to configure in DevStack — likely more pain than value here. seems good too but i fear it takes me too much time to make it work , it seems too complex
+
+Option D — OpenStack Application Credentials
+This is actually the most production-realistic option and underused in learning projects. also suits me , tell me how To integrate those with my current setup
+
+auth proxy definetly runs a dedicated small vm

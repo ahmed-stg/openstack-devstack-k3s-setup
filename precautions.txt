@@ -1,0 +1,16 @@
+If you hit walls with networking, you may need to set AppArmor to complain mode for libvirtd or dnsmasq specifically
+
+use a secondary network interface in your openstack VM (the 1st is natted for ssh ann add a new one for the OpenStack provider network) and tell DevStack to leave the 1st one alone.
+
+Since Debian 13 is your host, monitor the libvirtd logs on the host. If the Jammy VM (DevStack) feels "jittery," it’s usually due to the host's AppArmor profiles blocking the nested KVM calls.
+
+When installing K3s inside the VM, run it with the --disable servicelb flag and use OpenStack Floating IPs to access your services instead
+
+AppArmor/Libvirt: Debian 13 is stricter than Jammy. If the VM starts but stack.sh fails at the "Starting Libvirt" stage, check dmesg | grep -i apparmor on the Debian host. You may need to disable the AppArmor profile for Libvirt temporarily: sudo aa-complain /usr/sbin/libvirtd.
+
+K3s MTU: When you eventually boot a clone of this VM and install K3s, remember that OpenStack's default MTU is 1450 (due to VXLAN overhead). If you don't set K3s to use an MTU of 1450, you will experience weird "timeout" issues with large packets (like pulling Docker images).
+
+Since you are on Debian 13, it likely uses Python 3.12+. OpenStack's master branch is usually fine, but if you see ModuleNotFoundError: 'distutils', it's because Python removed distutils. DevStack usually handles this now, but if it fails early, it's almost always a Python version mismatch.
+
+Pro-Tip: If the script finishes and the VM shuts down (as per your script), the screen session will be gone. Only use the "shutdown" line in the script if you want to save the image for later.
+

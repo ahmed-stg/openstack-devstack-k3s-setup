@@ -1,0 +1,2 @@
+#!/bin/bash
+scp -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o GlobalKnownHostsFile=/dev/null -o LogLevel=ERROR "$@"

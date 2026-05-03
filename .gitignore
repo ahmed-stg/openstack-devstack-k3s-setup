@@ -1,0 +1,29 @@
+# ── Large binaries (download with wget, see README.md) ──
+noble-server-cloudimg-amd64.img
+k3s
+k3s-airgap-images-amd64.tar
+zot-linux-amd64
+skopeo
+
+# ── Generated keys & credentials ──
+auth-proxy-jwt.pem
+auth-proxy-jwt.pub.pem
+k3s-key.pem
+k3s-user-openrc.sh
+k3s-kubeconfig.yaml
+master_fip.txt
+
+# ── Runtime state ──
+devstack_env
+
+# ── Logs ──
+*.log
+*log.md
+k3slog.md
+
+# ── Misc ──
+.codex
+prompt.txt
+scripts.md
+RUN_ORDER.md
+help-commands.txt
