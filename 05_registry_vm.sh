@@ -59,10 +59,18 @@ if [[ -z "$REGISTRY_FIP" ]]; then
     vm_openstack tenant "openstack server add floating ip $REGISTRY_NAME $REGISTRY_FIP"
 fi
 
+wait_for_ssh "$REGISTRY_FIP" "$VM_SSH_KEY"
+
+# Get the ACTUAL IP the VM has (not what OpenStack reports — DHCP may differ)
+ACTUAL_IP=$(ssh "${SSH_BASE_OPTS[@]}" -i "$VM_SSH_KEY" "${SSH_USER}@${REGISTRY_FIP}" \
+    "ip -4 addr show eth0 | grep -oP 'inet \K[0-9.]+'" 2>/dev/null || true)
+if [[ -n "$ACTUAL_IP" ]]; then
+    log "Registry actual IP: $ACTUAL_IP (OpenStack reported: $REGISTRY_INTERNAL_IP)"
+    REGISTRY_INTERNAL_IP="$ACTUAL_IP"
+fi
+
 persist_env REGISTRY_NAME "$REGISTRY_NAME"
 persist_env REGISTRY_INTERNAL_IP "$REGISTRY_INTERNAL_IP"
 persist_env REGISTRY_FIP "$REGISTRY_FIP"
-
-wait_for_ssh "$REGISTRY_FIP" "$VM_SSH_KEY"
 
 log "Registry VM is ready at $REGISTRY_FIP (Internal: $REGISTRY_INTERNAL_IP)."

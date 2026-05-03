@@ -57,6 +57,15 @@ fi
 
 MASTER_INTERNAL_IP=$(wait_for_fixed_ip_for_net "$MASTER_NAME" "$K3S_CLUSTER_NET_NAME")
 
+# Get the ACTUAL IP the VM has (not what OpenStack reports — DHCP may differ)
+wait_for_ssh "$MASTER_FIP" "$VM_SSH_KEY"
+ACTUAL_IP=$(ssh "${SSH_BASE_OPTS[@]}" -i "$VM_SSH_KEY" "${SSH_USER}@${MASTER_FIP}" \
+    "ip -4 addr show eth0 | grep -oP 'inet \K[0-9.]+'" 2>/dev/null || true)
+if [[ -n "$ACTUAL_IP" ]]; then
+    log "Master actual IP: $ACTUAL_IP (OpenStack reported: $MASTER_INTERNAL_IP)"
+    MASTER_INTERNAL_IP="$ACTUAL_IP"
+fi
+
 persist_env MASTER_NAME "$MASTER_NAME"
 persist_env MASTER_FIP "$MASTER_FIP"
 persist_env MASTER_INTERNAL_IP "$MASTER_INTERNAL_IP"
@@ -74,8 +83,5 @@ scp "${SSH_BASE_OPTS[@]}" -i "$VM_SSH_KEY" "$SCRIPT_DIR/configure_br_ex.sh" "${S
 # Execute inside the VM as admin
 vm_ssh "bash -lc 'source /home/ubuntu/devstack/openrc admin admin && bash ~/configure_br_ex.sh'"
 
-
-log "Waiting for SSH on K3s Master: $MASTER_FIP"
-wait_for_ssh "$MASTER_FIP" "$VM_SSH_KEY"
 
 log "K3s Master VM is ready at $MASTER_FIP (Internal: $MASTER_INTERNAL_IP)."

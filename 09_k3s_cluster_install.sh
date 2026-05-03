@@ -56,8 +56,6 @@ worker_fips=()
 for i in $(seq 1 "$WORKER_COUNT"); do
     name="k3s-worker-$(printf "%02d" $i)"
     wait_for_server_status "$name" ACTIVE
-    ip=$(wait_for_fixed_ip_for_net "$name" "$K3S_CLUSTER_NET_NAME")
-    worker_ips+=("$ip")
 
     # Floating IP (needed for SSH access from host)
     WORKER_FIP=$(vm_openstack tenant "openstack server show $name -f value -c addresses" | grep -oE '192\.168\.122\.[0-9]+' | head -n1 || true)
@@ -68,6 +66,19 @@ for i in $(seq 1 "$WORKER_COUNT"); do
     fi
     worker_fips+=("$WORKER_FIP")
     wait_for_ssh "$WORKER_FIP" "$VM_SSH_KEY"
+
+    # Get the ACTUAL IP the VM has (not what OpenStack reports — DHCP may differ)
+    ACTUAL_IP=$(ssh "${SSH_BASE_OPTS[@]}" -i "$VM_SSH_KEY" "${SSH_USER}@${WORKER_FIP}" \
+        "ip -4 addr show eth0 | grep -oP 'inet \K[0-9.]+'" 2>/dev/null || true)
+    if [[ -n "$ACTUAL_IP" ]]; then
+        worker_ips+=("$ACTUAL_IP")
+        log "Worker $name actual IP: $ACTUAL_IP (FIP: $WORKER_FIP)"
+    else
+        # Fallback to OpenStack-reported IP
+        ip=$(wait_for_fixed_ip_for_net "$name" "$K3S_CLUSTER_NET_NAME")
+        worker_ips+=("$ip")
+        log "Worker $name OpenStack IP: $ip (FIP: $WORKER_FIP)"
+    fi
 done
 persist_env WORKER_IPS "$(IFS=,; echo "${worker_ips[*]}")"
 persist_env WORKER_FIP "${worker_fips[0]}"
@@ -98,6 +109,18 @@ SERVICE
 sudo systemctl daemon-reload
 sudo systemctl enable --now k3s
 EOF
+
+# Wait for K3s server to be ready (kubeconfig must exist)
+log "Waiting for K3s server to be ready..."
+for i in $(seq 1 60); do
+    if ssh "${SSH_BASE_OPTS[@]}" -i "$VM_SSH_KEY" "${SSH_USER}@${MASTER_FIP}" \
+        "test -f /etc/rancher/k3s/k3s.yaml" 2>/dev/null; then
+        log "K3s server is ready (attempt $i)."
+        break
+    fi
+    log "Waiting for K3s server... (attempt $i/60)"
+    sleep 5
+done
 
 # 3. Install K3s Agent on Workers
 for i in $(seq 1 "$WORKER_COUNT"); do
