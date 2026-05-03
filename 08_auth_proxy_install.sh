@@ -100,10 +100,6 @@ server {
     }
 
     location /v2/ {
-        # Docker client requirements
-        if (\$http_user_agent ~* "docker") {
-             # Basic auth check or just pass through to Zot which will return 401
-        }
         proxy_pass http://127.0.0.1:5002;
         proxy_set_header Host \$host;
         proxy_set_header X-Real-IP \$remote_addr;

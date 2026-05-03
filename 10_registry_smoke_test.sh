@@ -6,7 +6,7 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 # shellcheck disable=SC1091
 source "$SCRIPT_DIR/lib/common.sh"
 load_env
-require_env AUTH_PROXY_FIP AUTH_PROXY_APP_CRED_ID AUTH_PROXY_APP_CRED_SECRET K3S_CLUSTER_CIDR K3S_SERVICES_CIDR
+require_env AUTH_PROXY_FIP AUTH_PROXY_APP_CRED_ID AUTH_PROXY_APP_CRED_SECRET AUTH_PROXY_JWT_PUB_LOCAL K3S_CLUSTER_CIDR K3S_SERVICES_CIDR
 
 log_section "10_registry_smoke_test.sh"
 log "Configuring Nginx auth enforcement (Zot stays unauthenticated for K3s pulls)."
@@ -49,6 +49,7 @@ def jwt_sign(payload):
 
 def validate_bearer_token(auth_header):
     """Validate a Bearer token by checking its JWT signature with our public key."""
+    import tempfile
     if not auth_header or not auth_header.startswith("Bearer "):
         return False
     token = auth_header[7:]
@@ -56,14 +57,20 @@ def validate_bearer_token(auth_header):
         parts = token.split(".")
         if len(parts) != 3:
             return False
-        # Verify signature
+        # Verify signature — openssl dgst -signature requires a file, not stdin
         signing_input = (parts[0] + "." + parts[1]).encode()
         signature = base64.urlsafe_b64decode(parts[2] + "==")
-        proc = subprocess.run(
-            ["openssl", "dgst", "-sha256", "-verify", "/etc/zot/jwt.pub", "-signature", "/dev/stdin"],
-            input=signing_input,
-            capture_output=True
-        )
+        with tempfile.NamedTemporaryFile(delete=False) as sig_file:
+            sig_file.write(signature)
+            sig_path = sig_file.name
+        try:
+            proc = subprocess.run(
+                ["openssl", "dgst", "-sha256", "-verify", "/etc/zot/jwt.pub", "-signature", sig_path],
+                input=signing_input,
+                capture_output=True
+            )
+        finally:
+            os.unlink(sig_path)
         # Also check expiry
         payload = json.loads(base64.urlsafe_b64decode(parts[1] + "=="))
         if payload.get("exp", 0) < time.time():

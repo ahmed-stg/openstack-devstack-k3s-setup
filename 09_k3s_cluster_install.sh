@@ -112,15 +112,20 @@ EOF
 
 # Wait for K3s server to be ready (kubeconfig must exist)
 log "Waiting for K3s server to be ready..."
+K3S_READY=false
 for i in $(seq 1 60); do
     if ssh "${SSH_BASE_OPTS[@]}" -i "$VM_SSH_KEY" "${SSH_USER}@${MASTER_FIP}" \
         "test -f /etc/rancher/k3s/k3s.yaml" 2>/dev/null; then
         log "K3s server is ready (attempt $i)."
+        K3S_READY=true
         break
     fi
     log "Waiting for K3s server... (attempt $i/60)"
     sleep 5
 done
+if [[ "$K3S_READY" != "true" ]]; then
+    fail "K3s server did not become ready after 5 minutes. Check 'systemctl status k3s' on master."
+fi
 
 # 3. Install K3s Agent on Workers
 for i in $(seq 1 "$WORKER_COUNT"); do

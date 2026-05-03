@@ -96,7 +96,7 @@ scp "${SSH_BASE_OPTS[@]}" -i "$VM_SSH_KEY" "$ROOT_DIR/k3s-user-openrc.sh" "${SSH
 
 # Create a "System" Application Credential for the Auth Proxy (Idempotent)
 log "Ensuring System Application Credential for Auth Proxy."
-APP_CRED_EXISTS=$(vm_openstack tenant <<EOF
+APP_CRED_EXISTS=$(vm_openstack tenant <<EOF | tail -1
 openstack application credential show auth-proxy-system >/dev/null 2>&1 && echo yes || echo no
 EOF
 )
