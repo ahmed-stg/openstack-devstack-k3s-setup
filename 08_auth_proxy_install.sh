@@ -24,7 +24,7 @@ fi
 # Python Token Service
 tmp_token_service="$(mktemp)"
 cat > "$tmp_token_service" <<'PYEOF'
-import base64, json, os, subprocess, time, urllib.request, urllib.parse
+import base64, json, os, subprocess, time, urllib.request, urllib.parse, urllib.error
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 KEYSTONE_URL = os.environ["KEYSTONE_URL"]
@@ -46,7 +46,7 @@ class TokenHandler(BaseHTTPRequestHandler):
             auth_header = self.headers.get("Authorization", "")
             if not auth_header.startswith("Basic "):
                 self.send_response(401); self.send_header("WWW-Authenticate", 'Basic realm="Keystone"'); self.end_headers(); return
-            
+
             cred_raw = base64.b64decode(auth_header[6:]).decode()
             if ":" not in cred_raw: self.send_response(400); self.end_headers(); return
             app_id, app_secret = cred_raw.split(":", 1)
@@ -56,9 +56,13 @@ class TokenHandler(BaseHTTPRequestHandler):
                 body = json.dumps({"auth": {"identity": {"methods": ["application_credential"], "application_credential": {"id": app_id, "secret": app_secret}}}}).encode()
                 req = urllib.request.Request(f"{KEYSTONE_URL}/auth/tokens", data=body, headers={"Content-Type": "application/json"}, method="POST")
                 with urllib.request.urlopen(req) as resp:
-                    if resp.status != 201: raise Exception("Keystone auth failed")
+                    if resp.status != 201: raise Exception(f"Keystone returned {resp.status}")
+            except urllib.error.HTTPError as e:
+                err_body = e.read().decode(errors='replace')
+                print(f"Keystone auth failed: HTTP {e.code} — {err_body}", flush=True)
+                self.send_response(401); self.end_headers(); return
             except Exception as e:
-                print(f"Auth failed: {e}")
+                print(f"Keystone connection error: {e}", flush=True)
                 self.send_response(401); self.end_headers(); return
 
             # Issue Token
@@ -75,6 +79,9 @@ class TokenHandler(BaseHTTPRequestHandler):
             self.wfile.write(json.dumps({"token": token, "access_token": token, "expires_in": 3600}).encode())
         else:
             self.send_response(404); self.end_headers()
+
+    def log_message(self, fmt, *args):
+        print(f"[token-service] {fmt % args}", flush=True)
 
 if __name__ == "__main__":
     ThreadingHTTPServer(("127.0.0.1", 5001), TokenHandler).serve_forever()

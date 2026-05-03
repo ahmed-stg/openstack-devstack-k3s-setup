@@ -114,18 +114,12 @@ fi
 if [[ "$APP_CRED_EXISTS" == "no" ]]; then
     log "Creating new Application Credential 'auth-proxy-system'."
     APP_CRED_JSON=$(vm_openstack tenant <<EOF
-openstack application credential create auth-proxy-system --description "Used by Auth Proxy" -f json
+openstack application credential create auth-proxy-system --description "Used by Auth Proxy" --unrestricted -f json
 EOF
 )
-    # Extract ID and Secret (OpenStack CLI often returns Capitalized keys in JSON)
-    AUTH_PROXY_APP_CRED_ID=$(echo "$APP_CRED_JSON" | grep -oP '"ID": "\K[^"]+' | head -n1 || true)
-    AUTH_PROXY_APP_CRED_SECRET=$(echo "$APP_CRED_JSON" | grep -oP '"Secret": "\K[^"]+' | head -n1 || true)
-    
-    if [[ -z "$AUTH_PROXY_APP_CRED_ID" || -z "$AUTH_PROXY_APP_CRED_SECRET" ]]; then
-        # Try lowercase just in case
-        AUTH_PROXY_APP_CRED_ID=$(echo "$APP_CRED_JSON" | grep -oP '"id": "\K[^"]+' | head -n1 || true)
-        AUTH_PROXY_APP_CRED_SECRET=$(echo "$APP_CRED_JSON" | grep -oP '"secret": "\K[^"]+' | head -n1 || true)
-    fi
+    # Use python3 to parse JSON robustly (vm_openstack output may include MOTD/extra text)
+    AUTH_PROXY_APP_CRED_ID=$(echo "$APP_CRED_JSON" | python3 -c "import sys,json; lines=''.join(sys.stdin); d=json.loads(lines[lines.index('{'):]); print(d.get('id') or d.get('ID'))")
+    AUTH_PROXY_APP_CRED_SECRET=$(echo "$APP_CRED_JSON" | python3 -c "import sys,json; lines=''.join(sys.stdin); d=json.loads(lines[lines.index('{'):]); print(d.get('secret') or d.get('Secret'))")
 
     [[ -n "$AUTH_PROXY_APP_CRED_ID" ]] || fail "Failed to extract Application Credential ID"
     [[ -n "$AUTH_PROXY_APP_CRED_SECRET" ]] || fail "Failed to extract Application Credential Secret"
