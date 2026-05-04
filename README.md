@@ -161,7 +161,7 @@ final/
 ├── 07_auth_proxy_vm.sh        # No-op: auth proxy merged into registry VM
 ├── 08_auth_proxy_install.sh   # Nginx + Token Service on registry VM
 ├── 09_k3s_cluster_install.sh  # Worker VM + K3s server/agent install
-├── 10_registry_smoke_test.sh  # Enable bearer auth, test with curl
+├── 10_registry_smoke_test.sh  # Configure Nginx auth enforcement, test with curl
 ├── 11_enable_zot_auth.sh      # End-to-end: push image, deploy pod
 ├── XX_RUN_FROM_SNAPSHOT.sh    # Revert + reset + full stack (03-11)
 ├── XX_revert_to_snapshot.sh   # virsh snapshot revert
@@ -282,7 +282,7 @@ kubectl --kubeconfig k3s-kubeconfig.yaml describe pod <name>
 ```
 Common causes:
 - **501 Unsupported method POST**: Token service needs the `do_POST` handler (fixed in current `08_auth_proxy_install.sh`).
-- **authentication required**: The imagePullSecret credential may be wrong. Recreate it.
+- **authentication required**: The imagePullSecret credential may be wrong. Recreate it. Note: internal K3s pulls bypass auth (Nginx allows internal IPs), so the ImagePullSecret is optional for internal pulls.
 - **unknown**: Registry may be unreachable from the worker. Check security groups.
 
 ### Cannot reach floating IPs from host

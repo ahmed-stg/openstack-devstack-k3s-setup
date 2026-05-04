@@ -27,10 +27,10 @@ APP_CRED_JSON=$(ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null 
   -o GlobalKnownHostsFile=/dev/null -o LogLevel=ERROR \
   -i "$VM_SSH_KEY" ubuntu@$VM_IP \
   "bash -lc 'source ~/k3s-user-openrc.sh 2>/dev/null; \
-   openstack application credential create my-deploy-$(date +%s) -f json'" 2>/dev/null)
+   openstack application credential create my-deploy-$(date +%s) --unrestricted -f json'" 2>/dev/null)
 
-APP_ID=$(echo "$APP_CRED_JSON" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('id') or d.get('ID'))")
-APP_SECRET=$(echo "$APP_CRED_JSON" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('secret') or d.get('Secret'))")
+APP_ID=$(echo "$APP_CRED_JSON" | python3 -c "import sys,json; lines=''.join(sys.stdin); d=json.loads(lines[lines.index('{'):]); print(d.get('id') or d.get('ID'))")
+APP_SECRET=$(echo "$APP_CRED_JSON" | python3 -c "import sys,json; lines=''.join(sys.stdin); d=json.loads(lines[lines.index('{'):]); print(d.get('secret') or d.get('Secret'))")
 
 echo "APP_ID=$APP_ID"
 echo "APP_SECRET=$APP_SECRET"
@@ -93,7 +93,9 @@ EOF
 ## Step 3 — Create a Kubernetes ImagePullSecret
 
 The K3s workers pull from the **internal** registry IP (no floating IP needed).
-Create a secret so K8s can authenticate:
+Nginx allows internal IPs (10.10.0.0/24, 10.20.0.0/24) without authentication,
+so the ImagePullSecret is technically optional for internal pulls. However,
+creating it is good practice and required if you later restrict access.
 
 ```bash
 INTERNAL_REGISTRY="${REGISTRY_INTERNAL_IP}:5000"
@@ -145,19 +147,22 @@ Developer (host)
 │  Registry VM  (AUTH_PROXY_FIP)  │
 │  ┌─────────────────────────┐    │
 │  │  Nginx :5000 (public)   │◄──── Auth: /auth/token → JWT
+│  │  satisfy any:           │    │
+│  │  - Internal IP → allow  │    │
+│  │  - External → JWT only │    │
 │  └──────┬──────────────────┘    │
 │         │ localhost             │
 │  ┌──────▼──────┐  ┌──────────┐ │
 │  │  Zot :5002  │  │ Token    │ │
-│  │  (registry) │  │ Service  │──┼──► Keystone (VM_IP)
+│  │  (no auth)  │  │ Service  │──┼──► Keystone (VM_IP)
 │  └─────────────┘  └──────────┘ │
 └──────────────────────────────────┘
          ▲
-         │ INTERNAL_IP:5000 (Nginx)
+         │ INTERNAL_IP:5000 (Nginx — no auth for internal IPs)
 ┌────────┴───────────────────────┐
 │  K3s Cluster                   │
 │  master-01 + worker-01         │
-│  (imagePullSecret → JWT auth)  │
+│  (imagePullSecret optional)    │
 └────────────────────────────────┘
 ```
 
@@ -169,9 +174,9 @@ For a fast demo using nginx:alpine:
 source devstack_env
 
 # 1. Create credential
-AJ=$(ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o GlobalKnownHostsFile=/dev/null -o LogLevel=ERROR -i "$VM_SSH_KEY" ubuntu@$VM_IP "bash -lc 'source ~/k3s-user-openrc.sh 2>/dev/null; openstack application credential create qd-$(date +%s) -f json'" 2>/dev/null)
-AI=$(echo "$AJ" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('id') or d.get('ID'))")
-AS=$(echo "$AJ" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('secret') or d.get('Secret'))")
+AJ=$(ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o GlobalKnownHostsFile=/dev/null -o LogLevel=ERROR -i "$VM_SSH_KEY" ubuntu@$VM_IP "bash -lc 'source ~/k3s-user-openrc.sh 2>/dev/null; openstack application credential create qd-$(date +%s) --unrestricted -f json'" 2>/dev/null)
+AI=$(echo "$AJ" | python3 -c "import sys,json; lines=''.join(sys.stdin); d=json.loads(lines[lines.index('{'):]); print(d.get('id') or d.get('ID'))")
+AS=$(echo "$AJ" | python3 -c "import sys,json; lines=''.join(sys.stdin); d=json.loads(lines[lines.index('{'):]); print(d.get('secret') or d.get('Secret'))")
 
 # 2. Push image
 ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o GlobalKnownHostsFile=/dev/null -o LogLevel=ERROR -i "$VM_SSH_KEY" ubuntu@$MASTER_FIP "skopeo copy --dest-username='$AI' --dest-password='$AS' --dest-tls-verify=false docker://docker.io/library/nginx:alpine docker://$AUTH_PROXY_FIP:5000/demo:v1"

@@ -78,7 +78,12 @@ sudo bash XX_RUN_FROM_SNAPSHOT.sh
         │                                │
         │                          Issues JWT (RS256 signed)
         │                                │
-        ├── /v2/* ──────────────►  Zot :5002 (verifies JWT)
+        ├── /v2/* ──►  Nginx auth_request ──► /auth/validate (checks JWT)
+        │              │
+        │              ├── Internal IP → allowed (no auth needed)
+        │              └── External IP → requires valid Bearer JWT
+        │                                │
+        │           ──────────────────►  Zot :5002 (no auth, Nginx gates access)
         │
    Image data flows through
 ```
@@ -235,15 +240,19 @@ Installs K3s on master + worker:
 
 **Script:** `10_registry_smoke_test.sh`
 
-Enables bearer auth on Zot and tests the auth flow:
+Configures Nginx auth enforcement (Zot stays unauthenticated for K3s pulls):
 
-1. **Bearer Auth** — Zot config updated with:
-   - `auth.bearer.realm` pointing to the auth proxy
-   - `auth.bearer.cert` (JWT public key)
-   - Zot restarts on `127.0.0.1:5002`
-2. **curl Tests**:
-   - `/v2/` returns 401 with `WWW-Authenticate: Bearer` header
+1. **Zot: No Auth** — Zot config has no `auth.bearer` section. K3s registries.yaml
+   doesn't support bearer tokens, so internal pulls must work without auth.
+2. **Token Service Upgrade** — Adds `/auth/validate` endpoint for Nginx `auth_request`
+   subrequest. Validates JWT signature + expiry using the RSA public key.
+3. **Nginx `satisfy any`** — Allows requests if EITHER:
+   - Source IP is in `10.10.0.0/24` or `10.20.0.0/24` (internal, no auth)
+   - Request carries a valid Bearer JWT (external, auth required)
+4. **curl Tests**:
+   - `/v2/` from external returns 401 with `WWW-Authenticate: Bearer` header
    - `/auth/token` with Basic Auth returns a valid JWT
+   - `/v2/` with Bearer token returns 200
 
 ### Step 11 — Deployment Flow Demo
 
@@ -316,7 +325,7 @@ Already installed on the master VM for airgap image import.
 | `07_auth_proxy_vm.sh` | No-op: aliases auth-proxy IPs to registry IPs |
 | `08_auth_proxy_install.sh` | Install Nginx + Token Service, reconfigure Zot to localhost |
 | `09_k3s_cluster_install.sh` | Create worker VM, install K3s server + agent |
-| `10_registry_smoke_test.sh` | Enable bearer auth, test with curl |
+| `10_registry_smoke_test.sh` | Configure Nginx auth enforcement, test with curl |
 | `11_enable_zot_auth.sh` | End-to-end: push image, deploy pod |
 | `XX_RUN_FROM_SNAPSHOT.sh` | Revert + reset + run full stack (03-11) |
 | `XX_revert_to_snapshot.sh` | virsh snapshot revert (needs sudo) |

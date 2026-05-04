@@ -44,9 +44,9 @@ Internet / Host (192.168.122.1)
     │ k3s-cluster  │  │ k3s-cluster  │  │ k3s-services │
     │              │  │              │  │              │
     │ flannel.1    │  │ flannel.1    │  │ Nginx :5000  │
-    │ 10.42.0.0/24 │  │ 10.42.1.0/24 │  │ Zot  :5002   │
-    │ cni0         │  │              │  │ Token :5001  │
-    │ 10.42.0.1/24 │  │              │  │              │
+    │ 10.42.0.0/24 │  │ 10.42.1.0/24 │  │  (auth gate) │
+    │ cni0         │  │              │  │ Zot  :5002   │
+    │ 10.42.0.1/24 │  │              │  │ Token :5001  │
     └──────────────┘  └──────────────┘  └──────────────┘
 ```
 
@@ -179,7 +179,8 @@ Worker (10.10.0.239)
   → default route → 10.10.0.1 (k3s-router)
   → router routes to 10.20.0.0/24
   → 10.20.0.86 (registry ens2)
-  → Nginx :5000 → Zot :5002
+  → Nginx :5000 → satisfy any → IP allowed (10.10.0.0/24) → Zot :5002
+  (No auth needed — internal IP bypasses JWT requirement)
 ```
 
 ### Example 3: Developer pushes image from host
@@ -190,8 +191,10 @@ Host (192.168.122.1)
   → enp1s0 → br-ex
   → Neutron L3 NAT: 192.168.122.205 → 10.20.0.86
   → registry ens2 → Nginx :5000
-  → /auth/token → Token Service :5001
-  → /v2/* → Zot :5002
+  → satisfy any → IP denied → auth_request /auth_validate
+  → 401 → WWW-Authenticate: Bearer realm=http://FIP:5000/auth/token
+  → Skopeo gets JWT from /auth/token (via Token Service → Keystone)
+  → Retry /v2/ with Bearer JWT → auth_validate passes → Zot :5002
 ```
 
 ---
