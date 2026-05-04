@@ -53,7 +53,7 @@ rm -f \
     "$SCRIPT_DIR/master_fip.txt"
 
 # --- Step logs (fresh run produces new ones) ---
-rm -f "$SCRIPT_DIR"/{03,04,05,06,07,08,09,10,11}.log
+rm -f "$SCRIPT_DIR"/{03,04,05,06,07,08,09,10,11,12}.log
 rm -f "$SCRIPT_DIR"/{3,4,5,6,7}.log          # old naming
 rm -f "$SCRIPT_DIR"/revert.log "$SCRIPT_DIR"/reset.log
 
@@ -96,13 +96,15 @@ run_step 08 08_auth_proxy_install.sh
 run_step 09 09_k3s_cluster_install.sh
 run_step 10 10_registry_smoke_test.sh
 run_step 11 11_enable_zot_auth.sh
+run_step 12 12_demo_deploy.sh
 
 echo ""
 echo "═══════════════════════════════════════════════════════════════"
 echo "  FULL STACK COMPLETE"
 echo "═══════════════════════════════════════════════════════════════"
 echo ""
-echo "  K3s cluster is up. To deploy your app:"
+echo "  Apps are live and reachable. To interact:"
 echo "  1. source devstack_env"
-echo "  2. See DEPLOY_WORKFLOW.md for the push-to-deploy guide."
+echo "  2. curl \$PROD_APP_URL    # nginx:alpine"
+echo "  3. curl \$DEMO_APP_URL    # busybox httpd"
 echo ""

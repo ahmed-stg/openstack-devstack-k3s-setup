@@ -52,6 +52,7 @@ Before running any script, the host must have:
 - **Pre-downloaded binaries**: `k3s`, `k3s-airgap-images-amd64.tar`, `zot-linux-amd64`, `skopeo`
 
 `config.env` defines:
+
 | Variable | Value | Purpose |
 |---|---|---|
 | `BASE_IMAGE` | `./noble-server-cloudimg-amd64.img` | Ubuntu 24.04 qcow2 |
@@ -79,6 +80,7 @@ Before running any script, the host must have:
 Creates the foundational KVM virtual machine that will host OpenStack DevStack.
 
 **Key commands:**
+
 ```bash
 # Destroy existing VM if present
 sudo virsh destroy BaseDevStack
@@ -120,6 +122,7 @@ echo "export VM_IP=$IP_ADDR" > ./devstack_env
 Prepares the VM for DevStack installation. Must be run after Step 01.
 
 **Key commands:**
+
 ```bash
 source ./devstack_env   # Load VM_IP
 
@@ -213,6 +216,7 @@ openstack application credential create auth-proxy-system --unrestricted -f json
 Provisions the K3s master node as an OpenStack instance on the cluster network.
 
 **Key commands:**
+
 ```bash
 # Upload SSH public key as OpenStack keypair
 openstack keypair create --public-key ~/host_instance_key.pub k3s-key
@@ -266,6 +270,7 @@ sudo sysctl -w net.ipv4.conf.all.rp_filter=0   # Allow asymmetric routing
 Provisions the registry/auth-proxy VM on the services network with a Cinder volume for persistent storage.
 
 **Key commands:**
+
 ```bash
 # Create security group for registry
 openstack security group create registry-sg
@@ -299,6 +304,7 @@ openstack server add floating ip registry-01 <FIP>
 Installs the Zot OCI distribution registry on the Registry VM and populates it with K3s airgap images.
 
 **Key commands:**
+
 ```bash
 # SCP Zot binary to Registry VM
 scp zot-linux-amd64 ubuntu@$REGISTRY_FIP:~/zot
@@ -387,6 +393,7 @@ External:5000 > Nginx > /auth/token > Token Service (127.0.0.1:5001)
 ```
 
 **Key commands:**
+
 ```bash
 # Generate RSA keypair for JWT signing (on host)
 openssl genrsa -out auth-proxy-jwt.pem 2048
@@ -432,6 +439,7 @@ sudo systemctl restart nginx
 Installs K3s on the master and worker VMs, configured to use the private Zot registry for all image pulls.
 
 **Key commands:**
+
 ```bash
 # Create registries.yaml (mirrors ALL registries to Zot)
 cat > registries.yaml <<EOF
@@ -555,6 +563,7 @@ curl -H "Authorization: Bearer $JWT_TOKEN" http://$AUTH_PROXY_FIP:5000/v2/
 Demonstrates the complete production deployment workflow: create credentials, push an image, deploy a pod.
 
 **Key commands:**
+
 ```bash
 # 1. Create a new Application Credential for the deployment
 APP_CRED_JSON=$(openstack application credential create deploy-app-$(date +%s) --unrestricted -f json)

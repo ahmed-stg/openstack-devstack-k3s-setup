@@ -13,6 +13,16 @@ echo $AUTH_PROXY_FIP         # Registry + Auth Proxy floating IP
 echo $MASTER_FIP             # K3s master floating IP
 echo $REGISTRY_INTERNAL_IP   # Registry internal IP (K3s pulls from here)
 echo $KUBECONFIG_PATH        # k3s-kubeconfig.yaml
+echo $PROD_APP_URL           # nginx:alpine (exposed by script 12)
+echo $DEMO_APP_URL           # busybox httpd (exposed by script 12)
+```
+
+Script 12 already exposes two apps via NodePort. You can curl them immediately:
+
+```bash
+source devstack_env
+curl $PROD_APP_URL    # nginx:alpine default page
+curl $DEMO_APP_URL    # busybox httpd custom page
 ```
 
 ## Step 1 — Create an Application Credential

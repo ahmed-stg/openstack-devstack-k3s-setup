@@ -36,8 +36,8 @@ git clone <repo-url> && cd final
 sudo bash XX_RUN_FROM_SNAPSHOT.sh
 ```
 
-This reverts the VM, resets all state, and runs scripts 03-11 automatically.
-When it finishes, your K3s cluster is ready — see `DEPLOY_WORKFLOW.md` to deploy an app.
+This reverts the VM, resets all state, and runs scripts 03-12 automatically.
+When it finishes, your apps are live and reachable from the host — see `DEPLOY_WORKFLOW.md` for more.
 
 ---
 
@@ -112,7 +112,7 @@ sudo virsh snapshot-create-as --domain BaseDevStack \
 sudo virsh start BaseDevStack
 ```
 
-### Step 3-11 — Run the automation
+### Step 3-12 — Run the automation
 
 From this point, everything is automated:
 
@@ -133,18 +133,20 @@ source devstack_env
 ./09_k3s_cluster_install.sh 2>&1 | tee 09.log
 ./10_registry_smoke_test.sh 2>&1 | tee 10.log
 ./11_enable_zot_auth.sh     2>&1 | tee 11.log
+./12_demo_deploy.sh         2>&1 | tee 12.log
 ```
 
 ### Deploy your first app
 
-See **[DEPLOY_WORKFLOW.md](DEPLOY_WORKFLOW.md)** for the full push-to-deploy guide.
-
-Quick demo:
+Apps are already exposed by script 12. To curl them:
 
 ```bash
 source devstack_env
-# Follow the one-liner in DEPLOY_WORKFLOW.md
+curl $PROD_APP_URL    # nginx:alpine
+curl $DEMO_APP_URL    # busybox httpd
 ```
+
+See **[DEPLOY_WORKFLOW.md](DEPLOY_WORKFLOW.md)** for the full push-to-deploy guide.
 
 ---
 
@@ -163,7 +165,8 @@ final/
 ├── 09_k3s_cluster_install.sh  # Worker VM + K3s server/agent install
 ├── 10_registry_smoke_test.sh  # Configure Nginx auth enforcement, test with curl
 ├── 11_enable_zot_auth.sh      # End-to-end: push image, deploy pod
-├── XX_RUN_FROM_SNAPSHOT.sh    # Revert + reset + full stack (03-11)
+├── 12_demo_deploy.sh         # Expose apps via NodePort, push busybox, curl from host
+├── XX_RUN_FROM_SNAPSHOT.sh    # Revert + reset + full stack (03-12)
 ├── XX_revert_to_snapshot.sh   # virsh snapshot revert
 ├── XX_reset_rerun_state.sh    # Reset env vars + clean artifacts
 ├── DEPLOY_WORKFLOW.md         # Push-to-deploy user guide

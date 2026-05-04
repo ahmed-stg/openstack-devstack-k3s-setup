@@ -267,6 +267,28 @@ End-to-end demo of the production deployment flow:
 4. **Deploy Pod** — Pod spec references the internal registry + imagePullSecret
 5. **Verify** — Pod reaches `Ready` state, image pulled successfully
 
+### Step 12 — Demo Deploy (Expose & Curl)
+
+**Script:** `12_demo_deploy.sh`
+
+Makes deployed apps reachable from the host machine:
+
+1. **Open NodePort Range** — Adds security group rules for TCP 30000-32767
+   on both master and worker SGs so the host can reach NodePort services
+2. **Expose prod-app** — Labels the pod from step 11, creates a NodePort Service,
+   curls it from the host (nginx:alpine default page)
+3. **Push busybox** — Skopeo copies `busybox:latest` from Docker Hub to the
+   private registry as `demo-app:v1`
+4. **Deploy demo-app** — Pod runs `busybox httpd` (built-in HTTP server) serving
+   a custom HTML page, proving any image works through the auth flow
+5. **Expose demo-app** — NodePort Service, curl from host, verify HTTP 200
+6. **Persist URLs** — `PROD_APP_URL` and `DEMO_APP_URL` saved to `devstack_env`
+
+What is BusyBox? "The Swiss Army Knife of Embedded Linux" — a single ~2 MB
+binary combining tiny versions of many common UNIX utilities (sh, ls, cat,
+grep, wget, httpd, etc.). Its `httpd` applet serves as a minimal HTTP server,
+ideal for proving the full push-to-deploy pipeline with the smallest image.
+
 ---
 
 ## Key Design Decisions
@@ -327,7 +349,8 @@ Already installed on the master VM for airgap image import.
 | `09_k3s_cluster_install.sh` | Create worker VM, install K3s server + agent |
 | `10_registry_smoke_test.sh` | Configure Nginx auth enforcement, test with curl |
 | `11_enable_zot_auth.sh` | End-to-end: push image, deploy pod |
-| `XX_RUN_FROM_SNAPSHOT.sh` | Revert + reset + run full stack (03-11) |
+| `12_demo_deploy.sh` | Expose apps via NodePort, push busybox httpd, curl from host |
+| `XX_RUN_FROM_SNAPSHOT.sh` | Revert + reset + run full stack (03-12) |
 | `XX_revert_to_snapshot.sh` | virsh snapshot revert (needs sudo) |
 | `XX_reset_rerun_state.sh` | Reset devstack_env to base values |
 | `DEPLOY_WORKFLOW.md` | User guide for push-to-deploy |
