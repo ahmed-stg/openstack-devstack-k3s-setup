@@ -9,26 +9,26 @@ This project deploys a **fully air-gapped Kubernetes (K3s) cluster on top of Ope
 ## Architecture at a Glance
 
 ```
-┌─────────────────────────────────────────────────────────────────────┐
-│  Physical Host (Debian 13)                                         │
-│                                                                     │
-│  ┌───────────────────────────────────────────────────────────────┐  │
-│  │  BaseDevStack VM (KVM, 16GB RAM, 6 vCPU, 80GB disk)         │  │
-│  │  ┌─────────────────────────────────────────────────────────┐ │  │
-│  │  │  OpenStack DevStack (Keystone + Nova + Neutron OVN +   │ │  │
-│  │  │  Cinder + Glance)                                       │ │  │
-│  │  │                                                         │ │  │
-│  │  │  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐ │ │  │
-│  │  │  │ k3s-master-01│  │ registry-01   │  │ k3s-worker-01│ │ │  │
-│  │  │  │ (FIP)        │  │ (FIP)        │  │ (FIP)        │ │ │  │
-│  │  │  │ K3s Server   │  │ Zot (5002)   │  │ K3s Agent    │ │ │  │
-│  │  │  │ Skopeo       │  │ Nginx (5000) │  │              │ │ │  │
-│  │  │  │              │  │ Token Svc    │  │              │ │ │  │
-│  │  │  │ Cluster Net  │  │ Services Net │  │ Cluster Net  │ │ │  │
-│  │  │  └──────────────┘  └──────────────┘  └──────────────┘ │ │  │
-│  │  └─────────────────────────────────────────────────────────┘ │  │
-│  └───────────────────────────────────────────────────────────────┘  │
-└─────────────────────────────────────────────────────────────────────┘
++---------------------------------------------------------------------+
+|  Physical Host (Debian 13)                                          |
+|                                                                     |
+|  +---------------------------------------------------------------+  |
+|  |  BaseDevStack VM (KVM, 16GB RAM, 6 vCPU, 80GB disk)           |  |
+|  |  +---------------------------------------------------------+  |  |
+|  |  |  OpenStack DevStack (Keystone + Nova + Neutron OVN +    |  |  |
+|  |  |  Cinder + Glance)                                       |  |  |
+|  |  |                                                         |  |  |
+|  |  |  +--------------+  +--------------+  +--------------+   |  |  |
+|  |  |  | k3s-master-01|  | registry-01  |  | k3s-worker-01|   |  |  |
+|  |  |  | (FIP)        |  | (FIP)        |  | (FIP)        |   |  |  |
+|  |  |  | K3s Server   |  | Zot (5002)   |  | K3s Agent    |   |  |  |
+|  |  |  | Skopeo       |  | Nginx (5000) |  |              |   |  |  |
+|  |  |  |              |  | Token Svc    |  |              |   |  |  |
+|  |  |  | Cluster Net  |  | Services Net |  | Cluster Net  |   |  |  |
+|  |  |  +--------------+  +--------------+  +--------------+   |  |  |
+|  |  +---------------------------------------------------------+  |  |
+|  +---------------------------------------------------------------+  |
++---------------------------------------------------------------------+
 ```
 
 **Network topology:**
@@ -382,8 +382,8 @@ Installs the authentication layer on the Registry VM: a Python token service tha
 
 **Architecture on the Registry VM after this step:**
 ```
-External:5000 → Nginx → /auth/token → Token Service (127.0.0.1:5001)
-                       → /v2/*      → Zot (127.0.0.1:5002)
+External:5000 > Nginx > /auth/token > Token Service (127.0.0.1:5001)
+                       > /v2/*      > Zot (127.0.0.1:5002)
 ```
 
 **Key commands:**
@@ -410,8 +410,8 @@ sudo apt-get install -y nginx
 sudo systemctl enable --now token-service
 
 # Nginx config:
-# /auth/token → proxy_pass http://127.0.0.1:5001
-# /v2/        → proxy_pass http://127.0.0.1:5002
+# /auth/token > proxy_pass http://127.0.0.1:5001
+# /v2/        > proxy_pass http://127.0.0.1:5002
 sudo systemctl restart nginx
 ```
 
@@ -529,7 +529,7 @@ location = /auth_error_401 {
 
 **Smoke tests:**
 ```bash
-# Test 1: External access without auth → 401
+# Test 1: External access without auth > 401
 curl http://$AUTH_PROXY_FIP:5000/v2/
 # Expected: 401 with WWW-Authenticate header
 
@@ -539,7 +539,7 @@ curl -H "Authorization: Basic $BASIC_AUTH" \
     "http://$AUTH_PROXY_FIP:5000/auth/token?service=zot-registry&scope=repository:sandbox/smoke:pull"
 # Expected: JSON with "token" field
 
-# Test 3: Access /v2/ with Bearer token → 200
+# Test 3: Access /v2/ with Bearer token > 200
 curl -H "Authorization: Bearer $JWT_TOKEN" http://$AUTH_PROXY_FIP:5000/v2/
 # Expected: 200
 ```
