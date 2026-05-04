@@ -213,7 +213,7 @@ server {
         proxy_set_header Content-Length "";
         proxy_set_header X-Original-URI \$request_uri;
         proxy_set_header Authorization \$http_authorization;
-        # CRITICAL: use $http_host (includes port), not $host (strips port).
+        # CRITICAL: use \$http_host (includes port), not \$host (strips port).
         # The token service uses this to construct the realm URL in
         # WWW-Authenticate — without the port, Skopeo dials port 80.
         proxy_set_header Host \$http_host;
@@ -223,7 +223,7 @@ server {
     location = /auth_error_401 {
         internal;
         default_type text/plain;
-        # Use $http_host to include the port (e.g., "192.168.122.202:5000")
+        # Use \$http_host to include the port (e.g., "192.168.122.202:5000")
         add_header WWW-Authenticate 'Bearer realm="http://\$http_host/auth/token",service="zot-registry"' always;
         return 401 "authentication required\n";
     }
