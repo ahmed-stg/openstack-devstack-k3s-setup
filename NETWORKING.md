@@ -26,12 +26,12 @@ Internet / Host (192.168.122.1)
 │  │  Geneve tunnels between br-int ports (OVN)              │ │
 │  └──────────────────────────────────────────────────────────┘ │
 │                                                               │
-│  Neutron L3 Agent (qrouter namespace)                         │
+│  OVN logical router (no L3 agent, no qrouter namespace)       │
 │  ┌─ k3s-router ───────────────────────────────────────────┐ │
-│  │  external gateway → br-ex (192.168.122.201)             │ │
+│  │  external gateway → br-ex (public-subnet gateway IP)    │ │
 │  │  10.10.0.1  → k3s-cluster-subnet                        │ │
 │  │  10.20.0.1  → k3s-services-subnet                      │ │
-│  │  NAT: floating IPs → fixed IPs                          │ │
+│  │  NAT: floating IPs → fixed IPs (OVN distributed NAT)    │ │
 │  └──────────────────────────────────────────────────────────┘ │
 └─────────────────────────────────────────────────────────────┘
 
@@ -96,7 +96,7 @@ sudo ip route replace 192.168.122.200/29 via 192.168.122.79
 
 This tells the host: "to reach 192.168.122.200-205, send packets to the
 DevStack VM at 192.168.122.79". The VM then routes them through br-ex
-into the Neutron L3 agent, which NATs the floating IP to the fixed IP.
+into OVN, which applies the floating-IP DNAT/SNAT.
 
 Script `04_k3s_master_vm.sh` adds this route automatically.
 
@@ -125,7 +125,7 @@ The `k3s-router` connects both tenant networks to the public network:
 
 ### Layer 5 — Floating IPs (1:1 NAT)
 
-Neutron maps each floating IP to a fixed IP via the L3 agent:
+OVN maps each floating IP to a fixed IP (distributed NAT on the chassis):
 
 | Floating IP | Fixed IP | VM |
 |-------------|----------|----|
@@ -168,7 +168,7 @@ and workers cannot pull images.
 Host (192.168.122.1)
   → virbr0
   → enp1s0 (192.168.122.79)
-  → Neutron L3 agent NAT: 192.168.122.204 → 10.10.0.80
+  → OVN DNAT: 192.168.122.204 → 10.10.0.80
   → br-int → tap port → master VM ens2
 ```
 

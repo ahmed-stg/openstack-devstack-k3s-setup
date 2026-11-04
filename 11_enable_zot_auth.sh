@@ -25,11 +25,13 @@ log "App Credential: ID=$APP_ID"
 
 # Quick sanity check: verify the credential works against Keystone directly
 log "Verifying credential against Keystone (from registry VM)..."
-VALIDATE_CODE=$(ssh "${SSH_BASE_OPTS[@]}" -i "$VM_SSH_KEY" "${SSH_USER}@${AUTH_PROXY_FIP}" \
+if ! VALIDATE_CODE=$(ssh "${SSH_BASE_OPTS[@]}" -i "$VM_SSH_KEY" "${SSH_USER}@${AUTH_PROXY_FIP}" \
     "curl -s -o /dev/null -w '%{http_code}' -X POST \
      -H 'Content-Type: application/json' \
      -d '{\"auth\":{\"identity\":{\"methods\":[\"application_credential\"],\"application_credential\":{\"id\":\"${APP_ID}\",\"secret\":\"${APP_SECRET}\"}}}}' \
-     http://${VM_IP}/identity/v3/auth/tokens" 2>/dev/null || echo "000")
+     http://${VM_IP}/identity/v3/auth/tokens" 2>/dev/null); then
+    VALIDATE_CODE="000"
+fi
 if [[ "$VALIDATE_CODE" == "201" ]]; then
     log "PASS: Credential validated against Keystone (HTTP 201)."
 else
@@ -43,11 +45,22 @@ fi
 log "Step 2: Pushing nginx:alpine to Auth Proxy via Skopeo (on Master VM)."
 ssh "${SSH_BASE_OPTS[@]}" -i "$VM_SSH_KEY" "${SSH_USER}@${MASTER_FIP}" <<REMOTEEOF
 set -euo pipefail
-# Pull from Docker Hub and push to our registry via Auth Proxy (skopeo handles HTTP)
-skopeo copy --dest-username='${APP_ID}' --dest-password='${APP_SECRET}' \
-  --dest-tls-verify=false \
-  docker://docker.io/library/nginx:alpine \
-  docker://${AUTH_PROXY_FIP}:5000/my-app:v1
+# Pull from Docker Hub and push to our registry via Auth Proxy (skopeo handles HTTP).
+# docker.io is an external dependency: DNS/registry hiccups are transient, so retry
+# instead of failing the whole chain on one EAI_AGAIN.
+push_image() {
+    local src="\$1" dst="\$2" attempt
+    for attempt in 1 2 3 4; do
+        if skopeo copy --dest-username='${APP_ID}' --dest-password='${APP_SECRET}' \
+             --dest-tls-verify=false "\$src" "\$dst"; then
+            return 0
+        fi
+        echo "push of \$src failed (attempt \$attempt/4), retrying in 15s..." >&2
+        sleep 15
+    done
+    return 1
+}
+push_image docker://docker.io/library/nginx:alpine docker://${AUTH_PROXY_FIP}:5000/my-app:v1
 echo "Image pushed successfully."
 REMOTEEOF
 

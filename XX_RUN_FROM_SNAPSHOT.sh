@@ -74,14 +74,18 @@ done
 
 echo "      Env reset. Keys, logs, and stale SSH entries cleaned."
 
-# ── 3. Run the full stack (03 → 11) ──────────────────────────────────
+# ── 3. Run the full stack (03 → 12) ──────────────────────────────────
 run_step() {
     local number="$1"
     local script="$2"
     local log_file="${number}.log"
 
     printf '\n═══ Step %s: %s ═══\n' "$number" "$script"
-    "./$script" 2>&1 | tee "$log_file"
+    if ! "./$script" 2>&1 | tee "$log_file"; then
+        echo "" >&2
+        echo "ERROR: step $number ($script) failed — see $log_file" >&2
+        exit 1
+    fi
 }
 
 echo "[3/3] Running full stack..."

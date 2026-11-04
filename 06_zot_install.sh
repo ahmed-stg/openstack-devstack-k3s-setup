@@ -81,8 +81,20 @@ sudo systemctl daemon-reload
 sudo systemctl enable --now zot
 EOF
 
-log "Zot installed. Waiting for it to be ready..."
-sleep 5
+log "Zot installed. Waiting for the registry API to answer..."
+ZOT_READY=false
+for i in $(seq 1 30); do
+    if ssh "${SSH_BASE_OPTS[@]}" -i "$VM_SSH_KEY" "${SSH_USER}@${REGISTRY_FIP}" \
+        "curl -sf -o /dev/null --max-time 3 http://127.0.0.1:5000/v2/" 2>/dev/null; then
+        log "Zot is answering (attempt $i)."
+        ZOT_READY=true
+        break
+    fi
+    sleep 2
+done
+if [[ "$ZOT_READY" != "true" ]]; then
+    fail "Zot did not answer on :5000 within 60s (check 'systemctl status zot')."
+fi
 
 # 3. Optimized Airgap Strategy: Push images to Zot once
 log "Pushing K3s airgap images to Zot using host-downloaded Skopeo."

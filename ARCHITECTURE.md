@@ -35,7 +35,7 @@ sudo bash XX_RUN_FROM_SNAPSHOT.sh
 │  │  ├── Neutron (Networking) — OVS + br-ex                   │ │
 │  │  └── Cinder (Block Storage) — LVM backend                 │ │
 │  │                                                           │ │
-│  │  Tenant VMs (nested QEMU):                                │ │
+│  │  Tenant VMs (nested KVM):                                 │ │
 │  │                                                           │ │
 │  │  ┌─────────────────┐  ┌────────────────────────────────┐  │ │
 │  │  │ k3s-master-01  │  │ registry-01 (also Auth Proxy)  │  │ │
@@ -110,14 +110,15 @@ This VM becomes the OpenStack control plane.
 
 DevStack is installed inside the VM with:
 - **Keystone** — Identity service (user/project/role management)
-- **Nova** — Compute service (manages tenant VMs via nested QEMU)
+- **Nova** — Compute service (manages tenant VMs via nested KVM)
 - **Neutron** — Network service (virtual networks, routers, floating IPs)
 - **Cinder** — Block storage service (LVM volumes for tenant VMs)
 
 Configuration (`local.conf`):
 - `ENABLED_SERVICES=key,nova,n-novnc,n-cauth,n-api-meta,neutron,cinder`
-- `LIBVIRT_TYPE=qemu` (nested virtualization)
-- Admin password: `openstack`
+- `LIBVIRT_TYPE=kvm` (nested virtualization; use `qemu` only on hosts
+  without hardware virtualization)
+- Admin password: `nomoresecret`
 
 A snapshot `PostStack_Ready` is taken after installation for fast reverts.
 
@@ -182,7 +183,9 @@ Installs the Zot OCI registry on the registry VM:
    - Search and UI extensions enabled
 5. **Systemd** — `zot.service` for automatic startup
 6. **Airgap Images** — K3s airgap images are imported via Skopeo from
-   the master VM into Zot (local mirror for air-gapped operation)
+   the master VM into Zot. This is a *local mirror*, not an air-gapped
+   setup: `06` still `apt-get install`s `jq` and `11`/`12` still pull
+   `nginx:alpine` and `busybox` from `docker.io`.
 
 ### Step 07 — Auth Proxy VM (No-Op)
 
@@ -375,13 +378,19 @@ Already installed on the master VM for airgap image import.
 
 ## Resource Consumption
 
-| Component | RAM | vCPU | Disk |
-|-----------|-----|------|------|
-| DevStack VM (host) | 16 GB | 6 | 80 GB |
-| k3s-master-01 | 4 GB | 2 | 40 GB |
-| registry-01 | 2 GB | 1 | 20 GB (root) + 20 GB (Cinder) |
-| k3s-worker-01 | 1 GB | 1 | 10 GB |
-| **Total tenant** | **7 GB** | **4** | **90 GB** |
+| Component | Flavor | RAM | vCPU | Disk (declared) |
+|-----------|--------|-----|------|-----------------|
+| DevStack VM (host) | — | 16 GB | 6 | 80 GB |
+| k3s-master-01 | `m1.medium` | 4 GB | 2 | 40 GB |
+| registry-01 | `m1.small` | 2 GB | 1 | 20 GB (root) + 20 GB (Cinder) |
+| k3s-worker-01 | `ds1G` | 1 GB | 1 | 10 GB |
+| **Total tenant** | | **7 GB** | **4** | **90 GB** |
+
+The disks are qcow2 and thin-provisioned: the 90 GB above is the *declared*
+size of the flavors, while the whole DevStack overlay is about 6.3 GB on the
+host's 80 GB disk. Sizing an instance by its flavor therefore over-commits
+the hypervisor disk, which is why the worker uses `ds1G` (10 GB) and the
+registry keeps its data on a separate Cinder volume instead of its root disk.
 
 ---
 

@@ -3,8 +3,8 @@
 
 VM_NAME="BaseDevStack"
 
-# 1. Force stop the VM
-sudo virsh destroy $VM_NAME
+# 1. Force stop the VM (no-op if it is already shut off)
+sudo virsh destroy $VM_NAME 2>/dev/null || true
 
 # 2. Revert to your "PostStack_Ready" snapshot
 sudo virsh snapshot-revert --domain $VM_NAME --snapshotname "PostStack_Ready"

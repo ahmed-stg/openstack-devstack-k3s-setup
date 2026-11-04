@@ -14,16 +14,17 @@ log "Bootstrapping OpenStack environment for K3s."
 wait_for_ssh "$VM_IP" "$VM_SSH_KEY"
 
 # Ensure the Ubuntu image is available in DevStack
-if [[ -f "$IMAGE_PATH" ]]; then
-    log "Checking if image '$IMAGE_NAME' already exists in OpenStack."
-    if ! vm_openstack admin "openstack image show '$IMAGE_NAME' >/dev/null 2>&1"; then
-        log "Uploading $IMAGE_NAME to DevStack VM..."
-        scp "${SSH_BASE_OPTS[@]}" -i "$VM_SSH_KEY" "$IMAGE_PATH" "${SSH_USER}@${VM_IP}:/home/${SSH_USER}/ubuntu-noble.img"
-        vm_openstack admin "openstack image create '$IMAGE_NAME' --file ~/ubuntu-noble.img --disk-format qcow2 --container-format bare --public"
-        vm_ssh "rm -f ~/ubuntu-noble.img"
-    else
-        log "Image '$IMAGE_NAME' already exists."
-    fi
+log "Checking if image '$IMAGE_NAME' already exists in OpenStack."
+if ! vm_openstack admin "openstack image show '$IMAGE_NAME' >/dev/null 2>&1"; then
+    # Fail here, with the missing path, instead of letting 04 die on
+    # "image not found" much later.
+    require_file "$IMAGE_PATH"
+    log "Uploading $IMAGE_NAME to DevStack VM..."
+    scp "${SSH_BASE_OPTS[@]}" -i "$VM_SSH_KEY" "$IMAGE_PATH" "${SSH_USER}@${VM_IP}:/home/${SSH_USER}/ubuntu-noble.img"
+    vm_openstack admin "openstack image create '$IMAGE_NAME' --file ~/ubuntu-noble.img --disk-format qcow2 --container-format bare --public"
+    vm_ssh "rm -f ~/ubuntu-noble.img"
+else
+    log "Image '$IMAGE_NAME' already exists."
 fi
 
 # Core OpenStack Setup (Idempotent)

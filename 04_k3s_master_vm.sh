@@ -59,7 +59,13 @@ MASTER_INTERNAL_IP=$(wait_for_fixed_ip_for_net "$MASTER_NAME" "$K3S_CLUSTER_NET_
 
 # Ensure host-to-FIP routing (MUST happen before wait_for_ssh — FIP is unreachable without it)
 log "Ensuring host route to floating range via DevStack VM."
-sudo ip route replace "$FLOATING_RANGE" via "$VM_IP"
+if ! sudo -n ip route replace "$FLOATING_RANGE" via "$VM_IP" 2>/dev/null; then
+    if [[ -t 0 ]]; then
+        sudo ip route replace "$FLOATING_RANGE" via "$VM_IP"
+    else
+        fail "cannot add host route $FLOATING_RANGE via $VM_IP without root. Allow 'ip' for passwordless sudo — note sudo resolves it through secure_path, usually /usr/sbin/ip, not only /usr/bin/ip."
+    fi
+fi
 
 log "Ensuring DevStack VM forwards floating range through br-ex."
 # Copy configuration script
@@ -71,7 +77,7 @@ vm_ssh "bash -lc 'source /home/ubuntu/devstack/openrc admin admin && bash ~/conf
 # Now the FIP is reachable — wait for SSH and detect actual IP
 wait_for_ssh "$MASTER_FIP" "$VM_SSH_KEY"
 ACTUAL_IP=$(ssh "${SSH_BASE_OPTS[@]}" -i "$VM_SSH_KEY" "${SSH_USER}@${MASTER_FIP}" \
-    "ip -4 addr show eth0 | grep -oP 'inet \K[0-9.]+'" 2>/dev/null || true)
+    "ip -4 -o addr show scope global | awk '\$2 != \"lo\" {print \$4; exit}' | cut -d/ -f1" 2>/dev/null || true)
 if [[ -n "$ACTUAL_IP" ]]; then
     log "Master actual IP: $ACTUAL_IP (OpenStack reported: $MASTER_INTERNAL_IP)"
     MASTER_INTERNAL_IP="$ACTUAL_IP"

@@ -238,33 +238,43 @@ sudo mv ~/nginx.conf /etc/nginx/sites-available/auth-proxy
 sudo nginx -t && sudo systemctl restart nginx
 DEOF
 
-# 4. Smoke tests
+# 4. Smoke tests — hard gates: if any of these fail, 11/12 would fail later
+# in a much harder to diagnose way (timeouts, empty catalogs, 401s).
 log "Testing /v2/ endpoint from external (should return 401 with WWW-Authenticate)."
 RESP=$(curl -s -D - "http://${AUTH_PROXY_FIP}:5000/v2/" 2>/dev/null)
-HTTP_CODE=$(echo "$RESP" | head -1 | grep -oE '[0-9]{3}')
-if [[ "$HTTP_CODE" == "401" ]]; then
-    log "PASS: /v2/ returns 401 (auth required from external)."
-else
-    log "WARN: /v2/ returned $HTTP_CODE (expected 401)."
+HTTP_CODE=$(echo "$RESP" | head -1 | grep -oE '[0-9]{3}' || true)
+if [[ "$HTTP_CODE" != "401" ]]; then
+    fail "/v2/ from outside returned ${HTTP_CODE:-no response} (expected 401 — auth is not enforced)."
 fi
+log "PASS: /v2/ returns 401 (auth required from external)."
 
 log "Testing /auth/token endpoint with Application Credentials."
 BASIC_AUTH="$(printf '%s:%s' "$AUTH_PROXY_APP_CRED_ID" "$AUTH_PROXY_APP_CRED_SECRET" | base64 -w0)"
 TOKEN_RESPONSE=$(curl -s -H "Authorization: Basic $BASIC_AUTH" \
     "http://${AUTH_PROXY_FIP}:5000/auth/token?service=zot-registry&scope=repository:sandbox/smoke:pull")
-if echo "$TOKEN_RESPONSE" | python3 -c "import sys,json; d=json.load(sys.stdin); assert 'token' in d or 'access_token' in d" 2>/dev/null; then
-    log "PASS: Token endpoint issued a JWT."
-else
-    log "FAIL: Token endpoint did not return a token. Response: $TOKEN_RESPONSE"
+if ! echo "$TOKEN_RESPONSE" | python3 -c "import sys,json; d=json.load(sys.stdin); assert 'token' in d or 'access_token' in d" 2>/dev/null; then
+    fail "token endpoint did not return a JWT: $TOKEN_RESPONSE"
 fi
+log "PASS: Token endpoint issued a JWT."
 
 log "Testing /v2/ with Bearer token (should return 200)."
 JWT_TOKEN=$(echo "$TOKEN_RESPONSE" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('token') or d.get('access_token'))")
-AUTHED_CODE=$(curl -s -o /dev/null -w "%{http_code}" -H "Authorization: Bearer $JWT_TOKEN" "http://${AUTH_PROXY_FIP}:5000/v2/")
-if [[ "$AUTHED_CODE" == "200" ]]; then
-    log "PASS: /v2/ with Bearer token returns 200."
-else
-    log "WARN: /v2/ with Bearer token returned $AUTHED_CODE (expected 200)."
+AUTHED_CODE=$(curl -s -o /dev/null -w "%{http_code}" -H "Authorization: Bearer $JWT_TOKEN" "http://${AUTH_PROXY_FIP}:5000/v2/" || true)
+if [[ "$AUTHED_CODE" != "200" ]]; then
+    fail "/v2/ with a valid Bearer token returned ${AUTHED_CODE:-no response} (expected 200)."
 fi
+log "PASS: /v2/ with Bearer token returns 200."
 
-log "Smoke test complete: Nginx auth enforcement working (internal=open, external=JWT required)."
+# 5. The registry must actually hold the mirrored images. K3s resolves
+# docker.io/<repo> through registries.yaml, so a wrong repository path (for
+# example "mirrored-pause" instead of "rancher/mirrored-pause") makes the
+# pull silently fall back to the internet instead of failing.
+log "Checking that the airgap images are mirrored in Zot."
+CATALOG=$(ssh "${SSH_BASE_OPTS[@]}" -i "$VM_SSH_KEY" "${SSH_USER}@${AUTH_PROXY_FIP}" \
+    "curl -s --max-time 10 http://127.0.0.1:5002/v2/_catalog" 2>/dev/null || true)
+if ! printf '%s' "$CATALOG" | grep -q '"rancher/mirrored-pause"'; then
+    fail "Zot catalog does not contain 'rancher/mirrored-pause' (mirror path broken): ${CATALOG:-<empty>}"
+fi
+log "PASS: Zot catalog contains rancher/mirrored-pause."
+
+log "Smoke test complete: auth enforced outside, JWT accepted, images mirrored."
