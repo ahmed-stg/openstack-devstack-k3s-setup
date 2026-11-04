@@ -15,46 +15,18 @@ VM_SSH_KEY="${VM_SSH_KEY:-$HOME/.ssh/id_ed25519}"
 SSH_PUB_KEY="${SSH_PUB_KEY:-${VM_SSH_KEY}.pub}"
 SSH_USER="${SSH_USER:-ubuntu}"
 
-# Ensure SSH_USER is available
-if [[ -z "${SSH_USER:-}" ]]; then
-    SSH_USER="ubuntu"
-fi
+    SSH_BASE_OPTS=(
+        -o StrictHostKeyChecking=no
+        -o UserKnownHostsFile=/dev/null
+        -o GlobalKnownHostsFile=/dev/null
+        -o LogLevel=ERROR
+        -o ConnectTimeout=10
+        -o BatchMode=yes
+    )
 
-SSH_BASE_OPTS=(
-    -o StrictHostKeyChecking=no
-    -o UserKnownHostsFile=/dev/null
-    -o GlobalKnownHostsFile=/dev/null
-    -o LogLevel=ERROR
-    -o ConnectTimeout=10
-    -o BatchMode=yes
-)
+    # Global SSH args for CLI use
+    SSH_OPTS="-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o GlobalKnownHostsFile=/dev/null -o LogLevel=ERROR"
 
-# Global SSH args for CLI use
-SSH_OPTS="-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o GlobalKnownHostsFile=/dev/null -o LogLevel=ERROR"
-
-vm_ssh_jump() {
-    local target_ip="$1"
-    local jump_ip="$2"
-    shift 2
-    local cmd="$*"
-
-    ssh "${SSH_BASE_OPTS[@]}" -i "$VM_SSH_KEY" \
-        -o ProxyJump="${SSH_USER}@${jump_ip} -i ${VM_SSH_KEY} $SSH_OPTS ${SSH_OPTS}" \
-        "${SSH_USER}@${target_ip}" "$cmd"
-}
-
-scp_jump() {
-    local src="$1"
-    local target_dest="$2"
-    local jump_ip="$3"
-
-    # We need to construct the full ssh/scp command carefully. 
-    # scp doesn't always inherit SSH_BASE_OPTS properly if it's an array.
-    # We will use the SSH_OPTS string directly as it's more compatible.
-    scp $SSH_OPTS -i "$VM_SSH_KEY" \
-        -o ProxyJump="${SSH_USER}@${jump_ip} -i ${VM_SSH_KEY} $SSH_OPTS ${SSH_OPTS}" \
-        "$src" "${SSH_USER}@${target_dest}"
-}
     PROJECT_NAME="${PROJECT_NAME:-k3s-project}"
     PROJECT_DESC="${PROJECT_DESC:-K3s Deployment}"
     PROJECT_USER="${PROJECT_USER:-k3s-user}"
@@ -82,20 +54,15 @@ scp_jump() {
     WORKER_COUNT="${WORKER_COUNT:-1}"
     MASTER_NAME="${MASTER_NAME:-k3s-master-01}"
     MASTER_FLAVOR="${MASTER_FLAVOR:-m1.medium}"
-    WORKER_FLAVOR="${WORKER_FLAVOR:-m1.small}"
 
     REGISTRY_NAME="${REGISTRY_NAME:-registry-01}"
     REGISTRY_FLAVOR="${REGISTRY_FLAVOR:-m1.small}"
     REGISTRY_VOLUME_NAME="${REGISTRY_VOLUME_NAME:-registry-01-volume}"
     REGISTRY_VOLUME_SIZE="${REGISTRY_VOLUME_SIZE:-20}"
 
-    AUTH_PROXY_NAME="${AUTH_PROXY_NAME:-auth-proxy-01}"
-    AUTH_PROXY_FLAVOR="${AUTH_PROXY_FLAVOR:-m1.small}"
-
     K3S_BINARY_PATH="${K3S_BINARY_PATH:-$ROOT_DIR/k3s}"
     K3S_IMAGES_PATH="${K3S_IMAGES_PATH:-$ROOT_DIR/k3s-airgap-images-amd64.tar}"
     ZOT_BINARY_PATH="${ZOT_BINARY_PATH:-$ROOT_DIR/zot-linux-amd64}"
-    DOCKER_AUTH_BINARY_PATH="${DOCKER_AUTH_BINARY_PATH:-$ROOT_DIR/docker_auth}"
     KUBECONFIG_PATH="${KUBECONFIG_PATH:-$ROOT_DIR/k3s-kubeconfig.yaml}"
 }
 
@@ -231,8 +198,4 @@ wait_for_ssh() {
     done
 
     fail "ssh did not become ready on host '$host'"
-}
-
-server_exists() {
-    vm_openstack tenant "openstack server show $1 >/dev/null 2>&1 && echo yes || true"
 }

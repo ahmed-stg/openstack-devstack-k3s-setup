@@ -8,10 +8,16 @@ skopeo
 # ── Generated keys & credentials ──
 auth-proxy-jwt.pem
 auth-proxy-jwt.pub.pem
+*.pem
 k3s-key.pem
 k3s-user-openrc.sh
 k3s-kubeconfig.yaml
 master_fip.txt
+
+# ── Transient cloud-init artifacts (01_create_vm.sh) ──
+user-data
+meta-data
+cidata.iso
 
 # ── Runtime state ──
 devstack_env
