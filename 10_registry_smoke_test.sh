@@ -6,15 +6,20 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 # shellcheck disable=SC1091
 source "$SCRIPT_DIR/lib/common.sh"
 load_env
-require_env AUTH_PROXY_FIP AUTH_PROXY_APP_CRED_ID AUTH_PROXY_APP_CRED_SECRET AUTH_PROXY_JWT_PUB_LOCAL K3S_CLUSTER_CIDR K3S_SERVICES_CIDR
+require_env AUTH_PROXY_FIP REGISTRY_INTERNAL_IP MASTER_FIP
+require_env AUTH_PROXY_APP_CRED_ID AUTH_PROXY_APP_CRED_SECRET AUTH_PROXY_JWT_PUB_LOCAL
 
 log_section "10_registry_smoke_test.sh"
-log "Configuring Nginx auth enforcement (Zot stays unauthenticated for K3s pulls)."
+log "Enforcing registry auth at Nginx (Zot stays loopback-only, unauthenticated)."
 
-# 1. Ensure Zot has NO bearer auth — K3s registries.yaml can't do bearer tokens.
-# Auth is enforced at the Nginx layer instead.
-log "Ensuring Zot has no bearer auth (K3s internal pulls must work without tokens)."
-ssh "${SSH_BASE_OPTS[@]}" -i "$VM_SSH_KEY" "${SSH_USER}@${AUTH_PROXY_FIP}" <<EOF
+# 1. Zot itself keeps no auth: it is bound to 127.0.0.1 and only reachable
+# through Nginx, which is the single enforcement point.
+log "Ensuring Zot has no bearer auth and listens on loopback only."
+# Remote blocks are executed by a NON-login bash on purpose: Ubuntu's
+# ~/.bash_logout calls `clear_console -q`, which fails without a tty and — with
+# `set -e` still active — turns an explicit `exit 0` into exit status 1. Using
+# `bash -s` keeps .bash_logout out of the picture and preserves exit codes.
+ssh "${SSH_BASE_OPTS[@]}" -i "$VM_SSH_KEY" "${SSH_USER}@${AUTH_PROXY_FIP}" 'bash -s' <<EOF
 set -euo pipefail
 cat <<JSON | sudo tee /etc/zot/config.json >/dev/null
 {
@@ -28,146 +33,39 @@ JSON
 sudo systemctl restart zot
 EOF
 
-# 2. Add /auth/validate endpoint to token service
-# This endpoint checks if a Bearer token is valid (for Nginx auth_request).
-log "Adding /auth/validate endpoint to token service for Nginx auth_request."
-tmp_validate_patch="$(mktemp)"
-cat > "$tmp_validate_patch" <<'PYEOF'
-import base64, json, os, subprocess, time, urllib.request, urllib.parse, urllib.error
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+# 2. The token service is installed by 08 from lib/token_service.py (single
+#    source of truth). Here we only hand it the public key and check that the
+#    /auth/validate endpoint is live. 10 must never rewrite the service: that
+#    is what caused the two copies to drift apart.
+log "Installing JWT public key for token validation."
+scp "${SSH_BASE_OPTS[@]}" -i "$VM_SSH_KEY" "$AUTH_PROXY_JWT_PUB_LOCAL" \
+    "${SSH_USER}@${AUTH_PROXY_FIP}:~/jwt.pub"
 
-KEYSTONE_URL = os.environ["KEYSTONE_URL"]
-PRIVATE_KEY = "/etc/auth-proxy/jwt.key"
-SERVICE_NAME = "zot-registry"
-
-def jwt_sign(payload):
-    header = {"alg": "RS256", "typ": "JWT"}
-    signing_input = base64.urlsafe_b64encode(json.dumps(header).encode()).rstrip(b'=') + b'.' + \
-                    base64.urlsafe_b64encode(json.dumps(payload).encode()).rstrip(b'=')
-    proc = subprocess.run(["openssl", "dgst", "-sha256", "-sign", PRIVATE_KEY], input=signing_input, capture_output=True, check=True)
-    return signing_input.decode() + "." + base64.urlsafe_b64encode(proc.stdout).rstrip(b'=').decode()
-
-def validate_bearer_token(auth_header):
-    """Validate a Bearer token by checking its JWT signature with our public key."""
-    import tempfile
-    if not auth_header or not auth_header.startswith("Bearer "):
-        return False
-    token = auth_header[7:]
-    try:
-        parts = token.split(".")
-        if len(parts) != 3:
-            return False
-        # Verify signature — openssl dgst -signature requires a file, not stdin
-        signing_input = (parts[0] + "." + parts[1]).encode()
-        signature = base64.urlsafe_b64decode(parts[2] + "==")
-        with tempfile.NamedTemporaryFile(delete=False) as sig_file:
-            sig_file.write(signature)
-            sig_path = sig_file.name
-        try:
-            proc = subprocess.run(
-                ["openssl", "dgst", "-sha256", "-verify", "/etc/zot/jwt.pub", "-signature", sig_path],
-                input=signing_input,
-                capture_output=True
-            )
-        finally:
-            os.unlink(sig_path)
-        # Also check expiry
-        payload = json.loads(base64.urlsafe_b64decode(parts[1] + "=="))
-        if payload.get("exp", 0) < time.time():
-            return False
-        return proc.returncode == 0
-    except Exception:
-        return False
-
-class TokenHandler(BaseHTTPRequestHandler):
-    def do_POST(self):
-        self.do_GET()
-
-    def do_GET(self):
-        if self.path.startswith("/auth/validate"):
-            # Called by Nginx auth_request — returns 200 if Bearer token is valid, 401 otherwise
-            auth_header = self.headers.get("Authorization", "")
-            if validate_bearer_token(auth_header):
-                self.send_response(200)
-                self.end_headers()
-            else:
-                self.send_response(401)
-                self.send_header("WWW-Authenticate", 'Bearer realm="http://' + self.headers.get("Host", "localhost:5000") + '/auth/token",service="zot-registry"')
-                self.end_headers()
-
-        elif self.path.startswith("/auth/token"):
-            auth_header = self.headers.get("Authorization", "")
-            if not auth_header.startswith("Basic "):
-                self.send_response(401)
-                self.send_header("WWW-Authenticate", 'Basic realm="Keystone"')
-                self.end_headers()
-                return
-
-            cred_raw = base64.b64decode(auth_header[6:]).decode()
-            if ":" not in cred_raw:
-                self.send_response(400)
-                self.end_headers()
-                return
-            app_id, app_secret = cred_raw.split(":", 1)
-
-            # Validate against Keystone
-            try:
-                body = json.dumps({"auth": {"identity": {"methods": ["application_credential"], "application_credential": {"id": app_id, "secret": app_secret}}}}).encode()
-                req = urllib.request.Request(f"{KEYSTONE_URL}/auth/tokens", data=body, headers={"Content-Type": "application/json"}, method="POST")
-                with urllib.request.urlopen(req) as resp:
-                    if resp.status != 201:
-                        raise Exception(f"Keystone returned {resp.status}")
-            except urllib.error.HTTPError as e:
-                err_body = e.read().decode(errors='replace')
-                print(f"Keystone auth failed: HTTP {e.code} — {err_body}", flush=True)
-                self.send_response(401)
-                self.end_headers()
-                return
-            except Exception as e:
-                print(f"Keystone connection error: {e}", flush=True)
-                self.send_response(401)
-                self.end_headers()
-                return
-
-            # Issue Token
-            params = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
-            scope = params.get("scope", ["repository:sandbox/smoke:pull"])[0]
-            now = int(time.time())
-            token_payload = {
-                "iss": "auth-proxy", "sub": app_id, "aud": SERVICE_NAME,
-                "iat": now, "nbf": now, "exp": now + 3600,
-                "access": [{"type": scope.split(":")[0], "name": scope.split(":")[1], "actions": scope.split(":")[2].split(",")}]
-            }
-            token = jwt_sign(token_payload)
-            self.send_response(200)
-            self.send_header("Content-Type", "application/json")
-            self.end_headers()
-            self.wfile.write(json.dumps({"token": token, "access_token": token, "expires_in": 3600}).encode())
-        else:
-            self.send_response(404)
-            self.end_headers()
-
-    def log_message(self, fmt, *args):
-        print(f"[token-service] {fmt % args}", flush=True)
-
-if __name__ == "__main__":
-    ThreadingHTTPServer(("127.0.0.1", 5001), TokenHandler).serve_forever()
-PYEOF
-
-# Copy JWT public key to /etc/zot/jwt.pub for token validation
-scp "${SSH_BASE_OPTS[@]}" -i "$VM_SSH_KEY" "$AUTH_PROXY_JWT_PUB_LOCAL" "${SSH_USER}@${AUTH_PROXY_FIP}:~/jwt.pub"
-scp "${SSH_BASE_OPTS[@]}" -i "$VM_SSH_KEY" "$tmp_validate_patch" "${SSH_USER}@${AUTH_PROXY_FIP}:~/token_service.py"
-
-ssh "${SSH_BASE_OPTS[@]}" -i "$VM_SSH_KEY" "${SSH_USER}@${AUTH_PROXY_FIP}" <<EOF
+ssh "${SSH_BASE_OPTS[@]}" -i "$VM_SSH_KEY" "${SSH_USER}@${AUTH_PROXY_FIP}" 'bash -s' <<EOF
 set -euo pipefail
 sudo mv ~/jwt.pub /etc/zot/jwt.pub
 sudo chown zot:zot /etc/zot/jwt.pub
-sudo mv ~/token_service.py /etc/auth-proxy/token_service.py
 sudo systemctl restart token-service
+# A token-less /auth/validate must answer 401, which proves the endpoint exists
+# and the service is up (a 404 would mean 08 installed an older script).
+for i in \$(seq 1 15); do
+    CODE=\$(curl -s -o /dev/null -w '%{http_code}' --max-time 2 http://127.0.0.1:5001/auth/validate || true)
+    if [[ "\$CODE" == "401" ]]; then
+        echo "Token service /auth/validate is live (HTTP 401 without a token)."
+        exit 0
+    fi
+    sleep 2
+done
+echo "FAIL: /auth/validate did not answer 401 within 30s" >&2
+exit 1
 EOF
 
-# 3. Reconfigure Nginx: satisfy any (IP allow OR bearer token)
-log "Reconfiguring Nginx: internal IPs bypass auth, external needs Bearer token."
+# 3. Reconfigure Nginx: every /v2/ request needs a valid Bearer token.
+#    There is deliberately NO ip allow-list. The K3s nodes authenticate with the
+#    application credential configured in registries.yaml (09), so in-cluster
+#    traffic is authorised exactly like external traffic. The previous
+#    "satisfy any + allow 10.10.0.0/24" made any pod able to push anonymously.
+log "Reconfiguring Nginx: Bearer token required for every registry request."
 tmp_nginx_conf="$(mktemp)"
 cat > "$tmp_nginx_conf" <<EOF
 server {
@@ -175,26 +73,17 @@ server {
     client_max_body_size 0;
     chunked_transfer_encoding on;
 
-    # Auth token endpoint — always open (issues JWTs)
+    # Auth token endpoint — open, but requires Basic application credentials.
     location /auth/token {
         proxy_pass http://127.0.0.1:5001;
     }
 
-    # /v2/ — internal IPs bypass auth, external must present Bearer token
+    # /v2/ — authenticated for internal and external clients alike.
     location /v2/ {
-        # Allow EITHER: trusted internal IP, OR valid Bearer token
-        satisfy any;
-
-        # Access control: allow internal networks
-        allow $K3S_CLUSTER_CIDR;
-        allow $K3S_SERVICES_CIDR;
-        deny all;
-
-        # Auth request: validate Bearer token via token service
         auth_request /auth_validate;
         auth_request_set \$auth_status \$upstream_status;
 
-        # On auth failure, tell the client where to get a token
+        # On auth failure, tell the client where to get a token.
         error_page 401 = /auth_error_401;
 
         proxy_pass http://127.0.0.1:5002;
@@ -205,13 +94,16 @@ server {
         proxy_read_timeout 900;
     }
 
-    # Auth validation subrequest
+    # Auth validation subrequest. The token service needs the ORIGINAL method
+    # and URI to decide whether the token's scope covers this request;
+    # auth_request subrequests are always GET on /auth_validate.
     location = /auth_validate {
         internal;
         proxy_pass http://127.0.0.1:5001/auth/validate;
         proxy_pass_request_body off;
         proxy_set_header Content-Length "";
         proxy_set_header X-Original-URI \$request_uri;
+        proxy_set_header X-Original-Method \$request_method;
         proxy_set_header Authorization \$http_authorization;
         # CRITICAL: use \$http_host (includes port), not \$host (strips port).
         # The token service uses this to construct the realm URL in
@@ -223,7 +115,6 @@ server {
     location = /auth_error_401 {
         internal;
         default_type text/plain;
-        # Use \$http_host to include the port (e.g., "192.168.122.202:5000")
         add_header WWW-Authenticate 'Bearer realm="http://\$http_host/auth/token",service="zot-registry"' always;
         return 401 "authentication required\n";
     }
@@ -232,49 +123,102 @@ EOF
 
 scp "${SSH_BASE_OPTS[@]}" -i "$VM_SSH_KEY" "$tmp_nginx_conf" "${SSH_USER}@${AUTH_PROXY_FIP}:~/nginx.conf"
 
-ssh "${SSH_BASE_OPTS[@]}" -i "$VM_SSH_KEY" "${SSH_USER}@${AUTH_PROXY_FIP}" <<DEOF
+ssh "${SSH_BASE_OPTS[@]}" -i "$VM_SSH_KEY" "${SSH_USER}@${AUTH_PROXY_FIP}" 'bash -s' <<DEOF
 set -euo pipefail
 sudo mv ~/nginx.conf /etc/nginx/sites-available/auth-proxy
 sudo nginx -t && sudo systemctl restart nginx
 DEOF
 
-# 4. Smoke tests — hard gates: if any of these fail, 11/12 would fail later
-# in a much harder to diagnose way (timeouts, empty catalogs, 401s).
-log "Testing /v2/ endpoint from external (should return 401 with WWW-Authenticate)."
-RESP=$(curl -s -D - "http://${AUTH_PROXY_FIP}:5000/v2/" 2>/dev/null)
-HTTP_CODE=$(echo "$RESP" | head -1 | grep -oE '[0-9]{3}' || true)
-if [[ "$HTTP_CODE" != "401" ]]; then
-    fail "/v2/ from outside returned ${HTTP_CODE:-no response} (expected 401 — auth is not enforced)."
-fi
-log "PASS: /v2/ returns 401 (auth required from external)."
+# 4. Hard gates. Each failure would otherwise surface much later as a confusing
+#    timeout, an empty catalog, or a 000000 from the deploy scripts.
+REGISTRY_URL="http://${AUTH_PROXY_FIP}:5000"
+http_code() {
+    local code
+    if ! code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 "$@"); then
+        code="000"
+    fi
+    printf '%s' "$code"
+}
+mint_token() {  # $1 = scope, empty for a ping-only token
+    local scope="$1"
+    curl -s -u "${AUTH_PROXY_APP_CRED_ID}:${AUTH_PROXY_APP_CRED_SECRET}" \
+        "${REGISTRY_URL}/auth/token?service=zot-registry${scope:+&scope=${scope}}" \
+        | python3 -c 'import sys,json; d=json.load(sys.stdin); print(d.get("token") or d.get("access_token") or "")'
+}
 
-log "Testing /auth/token endpoint with Application Credentials."
-BASIC_AUTH="$(printf '%s:%s' "$AUTH_PROXY_APP_CRED_ID" "$AUTH_PROXY_APP_CRED_SECRET" | base64 -w0)"
-TOKEN_RESPONSE=$(curl -s -H "Authorization: Basic $BASIC_AUTH" \
-    "http://${AUTH_PROXY_FIP}:5000/auth/token?service=zot-registry&scope=repository:sandbox/smoke:pull")
-if ! echo "$TOKEN_RESPONSE" | python3 -c "import sys,json; d=json.load(sys.stdin); assert 'token' in d or 'access_token' in d" 2>/dev/null; then
-    fail "token endpoint did not return a JWT: $TOKEN_RESPONSE"
-fi
-log "PASS: Token endpoint issued a JWT."
+log "T1: /v2/ without a token must be 401."
+CODE=$(http_code "${REGISTRY_URL}/v2/")
+[[ "$CODE" == "401" ]] || fail "/v2/ without a token returned ${CODE} (expected 401)."
+log "PASS: unauthenticated /v2/ is rejected."
 
-log "Testing /v2/ with Bearer token (should return 200)."
-JWT_TOKEN=$(echo "$TOKEN_RESPONSE" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('token') or d.get('access_token'))")
-AUTHED_CODE=$(curl -s -o /dev/null -w "%{http_code}" -H "Authorization: Bearer $JWT_TOKEN" "http://${AUTH_PROXY_FIP}:5000/v2/" || true)
-if [[ "$AUTHED_CODE" != "200" ]]; then
-    fail "/v2/ with a valid Bearer token returned ${AUTHED_CODE:-no response} (expected 200)."
-fi
-log "PASS: /v2/ with Bearer token returns 200."
+log "T2: a valid token must be accepted on the ping endpoint."
+TOKEN=$(mint_token "")
+[[ -n "$TOKEN" ]] || fail "token endpoint did not return a JWT."
+CODE=$(http_code -H "Authorization: Bearer ${TOKEN}" "${REGISTRY_URL}/v2/")
+[[ "$CODE" == "200" ]] || fail "/v2/ with a valid token returned ${CODE} (expected 200)."
+log "PASS: token endpoint issues a JWT and /v2/ accepts it."
 
-# 5. The registry must actually hold the mirrored images. K3s resolves
+log "T3: a pull-scoped token must be accepted for that repository."
+PULL_TOKEN=$(mint_token "repository:rancher/mirrored-pause:pull")
+CODE=$(http_code -H "Authorization: Bearer ${PULL_TOKEN}" \
+    "${REGISTRY_URL}/v2/rancher/mirrored-pause/tags/list")
+[[ "$CODE" == "200" ]] || fail "pull token on mirrored-pause returned ${CODE} (expected 200)."
+log "PASS: pull-scoped token works on its repository."
+
+log "T4: a pull-only token must NOT be able to push."
+CODE=$(http_code -X PUT -H "Authorization: Bearer ${PULL_TOKEN}" \
+    -H 'Content-Type: application/vnd.oci.image.manifest.v1+json' \
+    --data '{}' "${REGISTRY_URL}/v2/my-app/manifests/scope-check")
+[[ "$CODE" == "401" || "$CODE" == "403" ]] || fail \
+    "pull-only token was allowed to PUT (HTTP ${CODE}) — scope is not enforced."
+log "PASS: scope is enforced (pull token rejected on push)."
+
+log "T5: a token for one repository must NOT grant access to another."
+CODE=$(http_code -H "Authorization: Bearer ${PULL_TOKEN}" \
+    "${REGISTRY_URL}/v2/my-app/tags/list")
+[[ "$CODE" == "401" || "$CODE" == "403" ]] || fail \
+    "token scoped to mirrored-pause was accepted for my-app (HTTP ${CODE})."
+log "PASS: repository scope is enforced."
+
+log "T6: in-cluster clients must no longer bypass authentication."
+CODE=$(ssh "${SSH_BASE_OPTS[@]}" -i "$VM_SSH_KEY" "${SSH_USER}@${MASTER_FIP}" \
+    "curl -s -o /dev/null -w '%{http_code}' --max-time 10 http://${REGISTRY_INTERNAL_IP}:5000/v2/" 2>/dev/null || echo "000")
+[[ "$CODE" == "401" ]] || fail \
+    "a cluster node reached the registry without a token (HTTP ${CODE}) — the IP allow-list still bypasses auth."
+log "PASS: internal traffic is authenticated too (no IP allow-list)."
+
+log "T7: malformed scope must be rejected with 400, not crash the service."
+CODE=$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 \
+    -u "${AUTH_PROXY_APP_CRED_ID}:${AUTH_PROXY_APP_CRED_SECRET}" \
+    "${REGISTRY_URL}/auth/token?scope=not-a-valid-scope" || true)
+[[ "$CODE" == "400" ]] || fail "malformed scope returned ${CODE} (expected 400)."
+log "PASS: malformed scope is rejected cleanly."
+
+# 5. The registry must actually hold every mirrored image. K3s resolves
 # docker.io/<repo> through registries.yaml, so a wrong repository path (for
-# example "mirrored-pause" instead of "rancher/mirrored-pause") makes the
-# pull silently fall back to the internet instead of failing.
-log "Checking that the airgap images are mirrored in Zot."
+# example "mirrored-pause" instead of "rancher/mirrored-pause") makes the pull
+# silently fall back to the internet instead of failing.
+log "Checking that every airgap image is mirrored in Zot."
 CATALOG=$(ssh "${SSH_BASE_OPTS[@]}" -i "$VM_SSH_KEY" "${SSH_USER}@${AUTH_PROXY_FIP}" \
     "curl -s --max-time 10 http://127.0.0.1:5002/v2/_catalog" 2>/dev/null || true)
-if ! printf '%s' "$CATALOG" | grep -q '"rancher/mirrored-pause"'; then
-    fail "Zot catalog does not contain 'rancher/mirrored-pause' (mirror path broken): ${CATALOG:-<empty>}"
+# Must match the images in the pinned k3s airgap tarball (v1.31.1+k3s1).
+EXPECTED_REPOS=(
+    rancher/klipper-helm
+    rancher/klipper-lb
+    rancher/local-path-provisioner
+    rancher/mirrored-coredns-coredns
+    rancher/mirrored-library-busybox
+    rancher/mirrored-library-traefik
+    rancher/mirrored-metrics-server
+    rancher/mirrored-pause
+)
+MISSING=()
+for repo in "${EXPECTED_REPOS[@]}"; do
+    printf '%s' "$CATALOG" | grep -q "\"${repo}\"" || MISSING+=("$repo")
+done
+if (( ${#MISSING[@]} > 0 )); then
+    fail "Zot catalog is missing: ${MISSING[*]} (got: ${CATALOG:-<empty>})"
 fi
-log "PASS: Zot catalog contains rancher/mirrored-pause."
+log "PASS: all ${#EXPECTED_REPOS[@]} airgap images are mirrored under rancher/."
 
-log "Smoke test complete: auth enforced outside, JWT accepted, images mirrored."
+log "Smoke test complete: auth enforced for all clients, scope checked, images mirrored."

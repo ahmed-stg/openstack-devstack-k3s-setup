@@ -78,10 +78,11 @@ sudo bash XX_RUN_FROM_SNAPSHOT.sh
         │                                │
         │                          Issues JWT (RS256 signed)
         │                                │
-        ├── /v2/* ──►  Nginx auth_request ──► /auth/validate (checks JWT)
-        │              │
-        │              ├── Internal IP → allowed (no auth needed)
-        │              └── External IP → requires valid Bearer JWT
+        ├── /v2/* ──►  Nginx auth_request ──► /auth/validate
+        │              │   (JWT signature + iss/aud/exp
+        │              │    + scope: repository:<name>:<action>)
+        │              ├── No / bad / unscoped token → 401
+        │              └── Valid, in-scope token → 200 (internal or external)
         │                                │
         │           ──────────────────►  Zot :5002 (no auth, Nginx gates access)
         │
@@ -183,23 +184,24 @@ Installs the Zot OCI registry on the registry VM:
    - Search and UI extensions enabled
 5. **Systemd** — `zot.service` for automatic startup
 6. **Airgap Images** — K3s airgap images are imported via Skopeo from
-   the master VM into Zot. This is a *local mirror*, not an air-gapped
-   setup: `06` still `apt-get install`s `jq` and `11`/`12` still pull
-   `nginx:alpine` and `busybox` from `docker.io`.
+   the master VM into Zot. The *deploy* is air-gapped: `nginx:alpine` and
+   `busybox` are vendored as `docker-archive` tarballs (`make vendor`) and
+   `11`/`12` push them from disk, so no external registry is contacted at
+   deploy time. Internet is only needed once, to assemble the offline
+   bundle (cloud image, k3s, airgap tar, zot, shellcheck, demo images).
 
-### Step 07 — Auth Proxy VM (No-Op)
+### Step 07 — Auth Proxy Address Aliases
 
 **Script:** `07_auth_proxy_vm.sh`
 
 **Originally** created a separate VM for the auth proxy. After hitting
 Nova placement errors (not enough disk for a 4th VM), the auth proxy
-was merged into the registry VM.
+was merged into the registry VM, so no fourth VM is created.
 
-This script is now a **no-op** that just aliases:
-- `AUTH_PROXY_FIP = REGISTRY_FIP`
-- `AUTH_PROXY_INTERNAL_IP = REGISTRY_INTERNAL_IP`
-
-This keeps downstream scripts (08, 10, 11) working without modification.
+The step still runs: it persists the aliases
+`AUTH_PROXY_FIP = REGISTRY_FIP` and
+`AUTH_PROXY_INTERNAL_IP = REGISTRY_INTERNAL_IP` to `devstack_env`, which keeps
+08, 10 and 11 working unchanged. It creates no OpenStack resource.
 
 ### Step 08 — Auth Proxy Install
 
@@ -208,11 +210,16 @@ This keeps downstream scripts (08, 10, 11) working without modification.
 Installs Nginx + Token Service on the registry VM:
 
 1. **RSA Keypair** — Generates `auth-proxy-jwt.pem` / `.pub.pem` for JWT signing
-2. **Token Service** — Python HTTP server on `127.0.0.1:5001` that:
-   - Accepts Basic Auth (Keystone Application Credential ID:secret)
-   - Validates against Keystone `/auth/tokens` endpoint
-   - Issues RS256-signed JWTs with scope-based access control
-   - Handles both GET and POST (containerd sends POST)
+2. **Token Service** — `lib/token_service.py`, a Python HTTP server on
+   `127.0.0.1:5001`. It is the single source of truth: `08` installs it and `10`
+   never rewrites it, so the two copies cannot drift apart. It:
+   - accepts Basic Auth (Keystone Application Credential ID:secret) and validates
+     it against Keystone `/auth/tokens`
+   - issues RS256-signed JWTs carrying an `access` claim, and rejects malformed
+     scopes with 400 instead of crashing
+   - serves `/auth/validate` for Nginx `auth_request`, checking signature,
+     `iss`, `aud`, `nbf`, `exp` and the requested repository/action
+   - handles both GET and POST (containerd sends POST)
 3. **Zot Reconfiguration** — Changes Zot from `0.0.0.0:5000` to `127.0.0.1:5002`
    (frees port 5000 for Nginx, avoids port conflict)
 4. **Nginx** — Reverse proxy on `0.0.0.0:5000`:
@@ -235,7 +242,12 @@ Installs K3s on master + worker:
    - `--tls-san` for FIP access to K8s API
    - `--token` for secure worker join
    - `--disable traefik` (not needed for demo)
-   - `registries.yaml` pointing all mirrors to the internal registry
+   - `registries.yaml` pointing all mirrors to the internal registry, plus an
+     explicit `mirrors."<internal-ip>:5000"` entry with an `http://` endpoint (a
+     `*` wildcard alone is not used for a directly-referenced host, and the
+     generated `hosts.toml` would be https-only), plus
+     `configs.<internal-ip>.auth` so containerd performs the registry token flow
+     with the application credential created by `03`
 3. **K3s Agent** — Installed on worker, joins via `--server=https://MASTER_INTERNAL_IP:6443`
 4. **Kubeconfig** — Fetched from master, rewritten with FIP for host access
 
@@ -243,19 +255,39 @@ Installs K3s on master + worker:
 
 **Script:** `10_registry_smoke_test.sh`
 
-Configures Nginx auth enforcement (Zot stays unauthenticated for K3s pulls):
+Configures Nginx auth enforcement:
 
-1. **Zot: No Auth** — Zot config has no `auth.bearer` section. K3s registries.yaml
-   doesn't support bearer tokens, so internal pulls must work without auth.
-2. **Token Service Upgrade** — Adds `/auth/validate` endpoint for Nginx `auth_request`
-   subrequest. Validates JWT signature + expiry using the RSA public key.
-3. **Nginx `satisfy any`** — Allows requests if EITHER:
-   - Source IP is in `10.10.0.0/24` or `10.20.0.0/24` (internal, no auth)
-   - Request carries a valid Bearer JWT (external, auth required)
-4. **curl Tests**:
-   - `/v2/` from external returns 401 with `WWW-Authenticate: Bearer` header
-   - `/auth/token` with Basic Auth returns a valid JWT
-   - `/v2/` with Bearer token returns 200
+1. **Zot: no auth, loopback only** — Zot listens on `127.0.0.1:5002` and is
+   reachable only through Nginx, which is the single enforcement point.
+2. **One token service** — `lib/token_service.py` (installed by `08`) provides
+   `/auth/token` and `/auth/validate`. `10` only reconfigures Nginx; it does not
+   rewrite the service, so the two copies can no longer drift apart.
+3. **No IP allow-list** — every `/v2/` request, internal or external, needs a
+   valid Bearer token. The `auth_request` subrequest forwards `X-Original-URI`
+   and `X-Original-Method`, and the service enforces the token's `access` claim
+   (`repository:<name>:<action>`) on top of `iss`/`aud`/`exp`. Cluster nodes
+   authenticate via `registries.yaml` (`configs.<ip>.auth`).
+4. **curl tests (hard gates)**:
+   - unauthenticated `/v2/` → 401 with `WWW-Authenticate: Bearer`
+   - valid token on the ping endpoint → 200
+   - scoped pull token → 200
+   - pull-only token on `PUT` → 401/403
+   - token for repository A used on repository B → 401/403
+   - in-cluster client without a token → 401 (the old bypass is gone)
+   - malformed scope on `/auth/token` → 400 (no crash)
+   - the Zot catalog contains all 8 mirrored `rancher/…` images
+
+### Authorisation Model (summary)
+
+| Client | How it authenticates | What it may do |
+|--------|----------------------|----------------|
+| External (host, CI) | Basic app credential → `/auth/token` → Bearer | only the scopes it requested, re-checked against `access` on every request |
+| K3s node (containerd) | `registries.yaml` `configs.<ip>.auth` | pull the mirrored repositories; a token is minted per pull |
+| Pod | imagePullSecret | same as the node, for the pod's image |
+| Anonymous | — | 401 on every `/v2/` request |
+
+There is no IP-based exemption: being on `10.10.0.0/24` or `10.20.0.0/24` buys
+nothing. Security-group rules only decide *reachability*, not authorisation.
 
 ### Step 11 — Deployment Flow Demo
 
@@ -264,11 +296,17 @@ Configures Nginx auth enforcement (Zot stays unauthenticated for K3s pulls):
 End-to-end demo of the production deployment flow:
 
 1. **Create App Credential** — New Keystone credential for the deployment
-2. **Push Image** — Skopeo on master copies `nginx:alpine` from Docker Hub
-   to the private registry (authenticated via app credential)
+2. **Push Image** — Skopeo on master copies the vendored
+   `vendor/nginx-alpine.tar` (`docker-archive:` source) to the private registry,
+   authenticated via the app credential. No docker.io contact at deploy time.
 3. **Create ImagePullSecret** — K8s secret with the app credential
-4. **Deploy Pod** — Pod spec references the internal registry + imagePullSecret
+4. **Deploy Pod** — Pod spec references the internal registry + imagePullSecret,
+   and carries `app: prod-app` so the Service created by `12` has an endpoint
 5. **Verify** — Pod reaches `Ready` state, image pulled successfully
+
+Note that the push from the master is now genuinely authenticated: before the
+IP allow-list was removed, `10.10.0.6` was whitelisted and the credentials were
+decorative.
 
 ### Step 12 — Demo Deploy (Expose & Curl)
 
@@ -280,8 +318,8 @@ Makes deployed apps reachable from the host machine:
    on both master and worker SGs so the host can reach NodePort services
 2. **Expose prod-app** — Labels the pod from step 11, creates a NodePort Service,
    curls it from the host (nginx:alpine default page)
-3. **Push busybox** — Skopeo copies `busybox:latest` from Docker Hub to the
-   private registry as `demo-app:v1`
+3. **Push busybox** — Skopeo copies the vendored `vendor/busybox.tar` to the
+   private registry as `demo-app:v1` (same air-gapped path)
 4. **Deploy demo-app** — Pod runs `busybox httpd` (built-in HTTP server) serving
    a custom HTML page, proving any image works through the auth flow
 5. **Expose demo-app** — NodePort Service, curl from host, verify HTTP 200
@@ -347,12 +385,19 @@ Already installed on the master VM for airgap image import.
 | `04_k3s_master_vm.sh` | Create K3s master VM with floating IP |
 | `05_registry_vm.sh` | Create registry VM with Cinder volume + floating IP |
 | `06_zot_install.sh` | Install Zot, format volume, import airgap images |
-| `07_auth_proxy_vm.sh` | No-op: aliases auth-proxy IPs to registry IPs |
-| `08_auth_proxy_install.sh` | Install Nginx + Token Service, reconfigure Zot to localhost |
+| `07_auth_proxy_vm.sh` | Aliases auth-proxy IPs to the registry IPs (no VM) |
+| `08_auth_proxy_install.sh` | Install Nginx, `lib/token_service.py`, move Zot to loopback |
 | `09_k3s_cluster_install.sh` | Create worker VM, install K3s server + agent |
 | `10_registry_smoke_test.sh` | Configure Nginx auth enforcement, test with curl |
 | `11_enable_zot_auth.sh` | End-to-end: push image, deploy pod |
 | `12_demo_deploy.sh` | Expose apps via NodePort, push busybox httpd, curl from host |
+| `99_teardown.sh` | Destroy the lab in dependency order (dry-run default, untested) |
+| `verify.sh` | Independent read-only verification of the live platform |
+| `Makefile` | `lint`, `vendor`, `vendor-tools`, `run`, `verify`, `teardown` |
+| `ci/lint.sh` | `bash -n` + `shellcheck` + `py_compile` over tracked files |
+| `hooks/pre-commit` | Runs `ci/lint.sh` when `core.hooksPath=hooks` |
+| `lib/token_service.py` | Registry token service (single source of truth) |
+| `TODO.md` | Prioritised hardening plan and acceptance criteria |
 | `XX_RUN_FROM_SNAPSHOT.sh` | Revert + reset + run full stack (03-12) |
 | `XX_revert_to_snapshot.sh` | virsh snapshot revert (needs sudo) |
 | `XX_reset_rerun_state.sh` | Reset devstack_env to base values |
@@ -397,10 +442,16 @@ registry keeps its data on a separate Cinder volume instead of its root disk.
 ## Quick Start
 
 ```bash
+# 0. One-time, needs internet: the two demo images and shellcheck
+make vendor && make vendor-tools
+
 # 1. One command to build everything from a clean snapshot
 sudo bash XX_RUN_FROM_SNAPSHOT.sh
 
-# 2. Deploy your first app (see DEPLOY_WORKFLOW.md for details)
+# 2. Verify without trusting the logs
+make verify
+
+# 3. Deploy your first app (see DEPLOY_WORKFLOW.md for details)
 source devstack_env
 # ... follow the one-liner in DEPLOY_WORKFLOW.md
 ```
@@ -423,3 +474,21 @@ source devstack_env
 
 5. **Skopeo > Docker for CI** — No daemon, no insecure-registry config,
    works with HTTP registries out of the box.
+
+6. **Scope enforcement needs the original request** — `auth_request`
+   subrequests are always `GET`, so Nginx forwards `X-Original-URI` and
+   `X-Original-Method`; without them the validator cannot tell a pull from a
+   push and a pull-only token would authorise a `PUT`.
+
+7. **Auth theatre is worse than no auth** — An IP allow-list plus a validator
+   that only checks the signature looks secure while letting every internal
+   client push anything. The fix was to delete the allow-list and check the
+   token's `access` claim, then prove it with negative tests (`10` T4/T5/T6).
+
+8. **A `*` mirror does not cover a directly-referenced host** — As soon as
+   `registries.yaml` contains `configs."<ip>:5000"`, k3s writes
+   `certs.d/<ip>:5000/hosts.toml` with an https-only `server` line. The `*`
+   wildcard is a fallback for registries nobody configured, so the plain-HTTP
+   Nginx answered an HTTPS request: `server gave HTTP response to HTTPS client`,
+   pod stuck in `ImagePullBackOff`. The fix is to list the registry host under
+   `mirrors` too, with its `http://` endpoint; k3s then emits a `[host]` fallback.

@@ -25,7 +25,8 @@ SSH_USER="${SSH_USER:-ubuntu}"
     )
 
     # Global SSH args for CLI use
-    SSH_OPTS="-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o GlobalKnownHostsFile=/dev/null -o LogLevel=ERROR"
+    # Exported for callers that source this library (02_init_vm.sh uses its own).
+    export SSH_OPTS="-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o GlobalKnownHostsFile=/dev/null -o LogLevel=ERROR"
 
     PROJECT_NAME="${PROJECT_NAME:-k3s-project}"
     PROJECT_DESC="${PROJECT_DESC:-K3s Deployment}"

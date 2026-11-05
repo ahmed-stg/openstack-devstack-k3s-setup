@@ -7,6 +7,7 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 source "$SCRIPT_DIR/lib/common.sh"
 load_env
 require_env VM_IP MASTER_FIP MASTER_INTERNAL_IP REGISTRY_INTERNAL_IP K3S_BINARY_PATH
+require_env AUTH_PROXY_APP_CRED_ID AUTH_PROXY_APP_CRED_SECRET
 
 log_section "09_k3s_cluster_install.sh"
 
@@ -14,6 +15,15 @@ log_section "09_k3s_cluster_install.sh"
 tmp_registries_yaml="$(mktemp)"
 cat > "$tmp_registries_yaml" <<EOF
 mirrors:
+  # The registry host itself needs an explicit http endpoint. Without this entry
+  # k3s generates certs.d/<ip>:5000/hosts.toml with an https-only "server" line,
+  # because the "*" wildcard is not used for a directly-referenced host. Adding
+  # the mirror makes k3s emit an http fallback, which is what the plain-HTTP
+  # Nginx listens on. (Found the hard way: ImagePullBackOff, "server gave HTTP
+  # response to HTTPS client".)
+  "$REGISTRY_INTERNAL_IP:5000":
+    endpoint:
+      - "http://$REGISTRY_INTERNAL_IP:5000"
   docker.io:
     endpoint:
       - "http://$REGISTRY_INTERNAL_IP:5000"
@@ -26,6 +36,16 @@ mirrors:
   "*":
     endpoint:
       - "http://$REGISTRY_INTERNAL_IP:5000"
+# Nginx enforces auth for every client, including the cluster nodes (there is no
+# IP allow-list). Containerd performs the registry v2 token flow with these
+# credentials: 401 -> /auth/token (Basic) -> Bearer for the actual pull.
+# The credential is an unrestricted Keystone application credential created by
+# 03; it is the same one stored in the K8s imagePullSecret.
+configs:
+  "$REGISTRY_INTERNAL_IP:5000":
+    auth:
+      username: "$AUTH_PROXY_APP_CRED_ID"
+      password: "$AUTH_PROXY_APP_CRED_SECRET"
 EOF
 
 K3S_CLUSTER_TOKEN="${K3S_CLUSTER_TOKEN:-$(openssl rand -hex 16)}"
@@ -102,6 +122,7 @@ log "Installing K3s on Master."
 scp "${SSH_BASE_OPTS[@]}" -i "$VM_SSH_KEY" "$K3S_BINARY_PATH" "${SSH_USER}@${MASTER_FIP}:~/k3s"
 scp "${SSH_BASE_OPTS[@]}" -i "$VM_SSH_KEY" "$tmp_registries_yaml" "${SSH_USER}@${MASTER_FIP}:~/registries.yaml"
 
+# shellcheck disable=SC2087  # heredoc expands locally on purpose (values are injected into the remote script)
 ssh "${SSH_BASE_OPTS[@]}" -i "$VM_SSH_KEY" "${SSH_USER}@${MASTER_FIP}" <<EOF
 set -euo pipefail
 sudo install -m 0755 ~/k3s /usr/local/bin/k3s
@@ -150,6 +171,7 @@ for i in $(seq 1 "$WORKER_COUNT"); do
     scp "${SSH_BASE_OPTS[@]}" -i "$VM_SSH_KEY" "$K3S_BINARY_PATH" "${SSH_USER}@${fip}:~/k3s"
     scp "${SSH_BASE_OPTS[@]}" -i "$VM_SSH_KEY" "$tmp_registries_yaml" "${SSH_USER}@${fip}:~/registries.yaml"
     
+# shellcheck disable=SC2087  # heredoc expands locally on purpose (values are injected into the remote script)
     ssh "${SSH_BASE_OPTS[@]}" -i "$VM_SSH_KEY" "${SSH_USER}@${fip}" <<EOF
 set -euo pipefail
 sudo install -m 0755 ~/k3s /usr/local/bin/k3s

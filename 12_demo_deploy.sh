@@ -39,7 +39,8 @@ EOF
 # ── Part A: Expose the existing prod-app (nginx:alpine from script 11) ──
 log_section "Part A: Expose prod-app (nginx:alpine)"
 
-# Script 11 creates the pod without labels — add one so the Service selector works.
+# 11 already labels the pod; keep this as a safety net for pods created before
+# that fix (it is idempotent and never fails the run).
 kubectl --kubeconfig "$KUBECONFIG_PATH" label pod prod-app app=prod-app --overwrite >/dev/null 2>&1 || true
 kubectl --kubeconfig "$KUBECONFIG_PATH" wait --for=condition=Ready pod/prod-app --timeout=180s
 
@@ -114,10 +115,16 @@ persist_env PROD_APP_URL "$PROD_APP_URL"
 # ──────────────────────────────────────────────────────────────────────
 log_section "Part B: Push busybox, deploy custom HTTP server"
 
-log "Pushing busybox:latest to private registry as demo-app:v1 ..."
+log "Pushing vendored busybox:latest to private registry as demo-app:v1 ..."
+BUSYBOX_TAR="$SCRIPT_DIR/vendor/busybox.tar"
+[[ -f "$BUSYBOX_TAR" ]] || fail "vendored image not found: $BUSYBOX_TAR — run 'make vendor' on a machine with internet access"
+scp "${SSH_BASE_OPTS[@]}" -i "$VM_SSH_KEY" "$BUSYBOX_TAR" \
+    "${SSH_USER}@${MASTER_FIP}:/home/${SSH_USER}/busybox.tar"
+
+# shellcheck disable=SC2087  # heredoc expands locally on purpose (values are injected into the remote script)
 ssh "${SSH_BASE_OPTS[@]}" -i "$VM_SSH_KEY" "${SSH_USER}@${MASTER_FIP}" <<REMOTEEOF
 set -euo pipefail
-# docker.io is an external dependency; retry transient DNS/registry failures.
+# Local docker-archive source: no docker.io contact. Retries cover the registry.
 push_image() {
     local src="\$1" dst="\$2" attempt
     for attempt in 1 2 3 4; do
@@ -131,7 +138,8 @@ push_image() {
     done
     return 1
 }
-push_image docker://docker.io/library/busybox:latest docker://${AUTH_PROXY_FIP}:5000/demo-app:v1
+push_image docker-archive:/home/${SSH_USER}/busybox.tar:busybox:latest docker://${AUTH_PROXY_FIP}:5000/demo-app:v1
+rm -f /home/${SSH_USER}/busybox.tar
 echo "busybox pushed successfully."
 REMOTEEOF
 

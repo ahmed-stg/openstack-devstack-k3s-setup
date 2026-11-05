@@ -5,6 +5,9 @@ k3s-airgap-images-amd64.tar
 zot-linux-amd64
 skopeo
 
+# ── Vendored binaries (make vendor / make vendor-tools) ──
+vendor/
+
 # ── Generated keys & credentials ──
 auth-proxy-jwt.pem
 auth-proxy-jwt.pub.pem
@@ -28,8 +31,12 @@ devstack_env
 k3slog.md
 
 # ── Misc ──
+PRE_HARDENING_COMMIT.txt
 .codex
 prompt.txt
 scripts.md
 RUN_ORDER.md
 help-commands.txt
+
+# ── Python caches (ci/lint.sh) ──
+__pycache__/

@@ -5,6 +5,7 @@ ROOT_DIR="$(pwd)"
 export DEVSTACK_ENV_FILE="$ROOT_DIR/devstack_env"
 
 if [[ -f "$DEVSTACK_ENV_FILE" ]]; then
+    # shellcheck source=/dev/null
     source "$DEVSTACK_ENV_FILE"
     echo "Environment loaded from $DEVSTACK_ENV_FILE"
 else

@@ -156,11 +156,19 @@ This works because `k3s-router` routes between the two subnets.
 
 **But there's a catch**: the registry's security group (`registry-sg`)
 must allow traffic from `10.10.0.0/24`. Without that rule, the master
-and workers cannot pull images.
+and workers cannot reach the registry at all.
+
+That rule is only about *reachability*. It is not an authentication bypass:
+since step `10` removed the Nginx IP allow-list, a packet from `10.10.0.0/24`
+needs a scoped Bearer token exactly like a packet from the host.
 
 ---
 
 ## Data Flow Examples
+
+The addresses below come from one representative run. The authoritative values
+for your deployment are always in `devstack_env` (`MASTER_FIP`,
+`REGISTRY_FIP`, `MASTER_INTERNAL_IP`, `REGISTRY_INTERNAL_IP`).
 
 ### Example 1: SSH from host to master
 
@@ -168,19 +176,21 @@ and workers cannot pull images.
 Host (192.168.122.1)
   → virbr0
   → enp1s0 (192.168.122.79)
-  → OVN DNAT: 192.168.122.204 → 10.10.0.80
+  → OVN DNAT: 192.168.122.205 → 10.10.0.61
   → br-int → tap port → master VM ens2
 ```
 
 ### Example 2: K3s worker pulls image from registry
 
 ```
-Worker (10.10.0.239)
+Worker (10.10.0.62)
   → default route → 10.10.0.1 (k3s-router)
   → router routes to 10.20.0.0/24
-  → 10.20.0.86 (registry ens2)
-  → Nginx :5000 → satisfy any → IP allowed (10.10.0.0/24) → Zot :5002
-  (No auth needed — internal IP bypasses JWT requirement)
+  → 10.20.0.91 (registry)
+  → Nginx :5000 → auth_request /auth_validate → 401
+  → container runtime uses configs.<ip>.auth from registries.yaml
+  → /auth/token (Basic → Keystone) → Bearer → 200 → Zot :5002
+  (No IP allow-list: in-cluster traffic is authenticated too)
 ```
 
 ### Example 3: Developer pushes image from host
@@ -189,12 +199,12 @@ Worker (10.10.0.239)
 Host (192.168.122.1)
   → ip route: 192.168.122.200/29 via 192.168.122.79
   → enp1s0 → br-ex
-  → Neutron L3 NAT: 192.168.122.205 → 10.20.0.86
-  → registry ens2 → Nginx :5000
-  → satisfy any → IP denied → auth_request /auth_validate
-  → 401 → WWW-Authenticate: Bearer realm=http://FIP:5000/auth/token
-  → Skopeo gets JWT from /auth/token (via Token Service → Keystone)
-  → Retry /v2/ with Bearer JWT → auth_validate passes → Zot :5002
+  → Neutron L3 NAT: 192.168.122.204 → 10.20.0.91
+  → registry → Nginx :5000
+  → no token → auth_request /auth_validate → 401
+  → WWW-Authenticate: Bearer realm=http://FIP:5000/auth/token
+  → Skopeo gets JWT from /auth/token (Token Service → Keystone)
+  → Retry /v2/ with Bearer JWT → signature + scope checked → Zot :5002
 ```
 
 ---
@@ -301,7 +311,7 @@ k3s server --flannel-backend=none --disable-network-policy
 
 ### 8. Registry has no dedicated internal DNS
 
-**Problem:** K3s workers reach the registry via IP (`10.20.0.86:5000`).
+**Problem:** K3s workers reach the registry via IP (`10.20.0.91:5000`).
 If the registry VM is recreated with a new IP, every K3s config must
 be updated (`registries.yaml`, kubeconfig, imagePullSecrets).
 

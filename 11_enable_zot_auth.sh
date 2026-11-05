@@ -42,12 +42,21 @@ else
 fi
 
 # 2. Push an image using Skopeo on the Master VM (no Docker insecure-registry needed)
-log "Step 2: Pushing nginx:alpine to Auth Proxy via Skopeo (on Master VM)."
+# The image is vendored as a docker-archive tarball (see README "download required
+# binaries"). Nothing is fetched from docker.io at deploy time: the platform is
+# air-gapped from the moment the offline bundle is assembled.
+NGINX_TAR="$SCRIPT_DIR/vendor/nginx-alpine.tar"
+[[ -f "$NGINX_TAR" ]] || fail "vendored image not found: $NGINX_TAR — run 'make vendor' on a machine with internet access"
+
+log "Step 2: Pushing vendored nginx:alpine to Auth Proxy via Skopeo (on Master VM)."
+scp "${SSH_BASE_OPTS[@]}" -i "$VM_SSH_KEY" "$NGINX_TAR" \
+    "${SSH_USER}@${MASTER_FIP}:/home/${SSH_USER}/nginx-alpine.tar"
+
+# shellcheck disable=SC2087  # heredoc expands locally on purpose (values are injected into the remote script)
 ssh "${SSH_BASE_OPTS[@]}" -i "$VM_SSH_KEY" "${SSH_USER}@${MASTER_FIP}" <<REMOTEEOF
 set -euo pipefail
-# Pull from Docker Hub and push to our registry via Auth Proxy (skopeo handles HTTP).
-# docker.io is an external dependency: DNS/registry hiccups are transient, so retry
-# instead of failing the whole chain on one EAI_AGAIN.
+# Source is a local docker-archive, destination is our registry through the auth
+# proxy. No external registry is contacted; retries cover local registry hiccups.
 push_image() {
     local src="\$1" dst="\$2" attempt
     for attempt in 1 2 3 4; do
@@ -60,7 +69,8 @@ push_image() {
     done
     return 1
 }
-push_image docker://docker.io/library/nginx:alpine docker://${AUTH_PROXY_FIP}:5000/my-app:v1
+push_image docker-archive:/home/${SSH_USER}/nginx-alpine.tar:nginx:alpine docker://${AUTH_PROXY_FIP}:5000/my-app:v1
+rm -f /home/${SSH_USER}/nginx-alpine.tar
 echo "Image pushed successfully."
 REMOTEEOF
 
@@ -82,6 +92,8 @@ apiVersion: v1
 kind: Pod
 metadata:
   name: prod-app
+  labels:
+    app: prod-app   # the Service created by 12 selects on this label
 spec:
   containers:
   - name: app

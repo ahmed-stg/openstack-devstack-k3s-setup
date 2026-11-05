@@ -1,0 +1,4 @@
+# Sourced libraries are resolved with -x (ci/lint.sh passes it).
+external-sources=true
+# The scripts target bash (all have a shebang; this is for generated snippets).
+shell=bash
