@@ -2,15 +2,18 @@
 
 ## The Big Picture
 
+Addresses are written as `$MASTER_FIP`, `$REGISTRY_INTERNAL_IP`, … because they
+change on every run: `source devstack_env` to get the real values.
+
 ```
-Internet / Host (192.168.122.1)
+Internet / Host ($VM_HOST_IP)
     │
     │ virbr0 (libvirt NAT bridge)
     ▼
 ┌─────────────────────────────────────────────────────────────┐
-│  DevStack VM  (192.168.122.79)                               │
+│  DevStack VM  ($VM_IP)                                       │
 │                                                               │
-│  enp1s0 ─── 192.168.122.79/24  (management, SSH from host)  │
+│  enp1s0 ─── $VM_IP/24  (management, SSH from host)          │
 │  enp2s0 ─── DOWN (plumbed into br-ex by OVS)                │
 │                                                               │
 │  ┌─ OVS ───────────────────────────────────────────────────┐ │
@@ -39,8 +42,10 @@ Internet / Host (192.168.122.1)
            ▼
     ┌──────────────┐  ┌──────────────┐  ┌──────────────┐
     │ k3s-master-01│  │ k3s-worker-01│  │ registry-01  │
-    │ FIP: .204    │  │ FIP: .202    │  │ FIP: .205    │
-    │ 10.10.0.80   │  │ 10.10.0.239  │  │ 10.20.0.86   │
+    │ FIP          │  │ FIP          │  │ FIP          │
+    │ $MASTER_FIP  │  │ $WORKER_FIP  │  │ $REGISTRY_FIP│
+    │ $MASTER_     │  │ $WORKER_     │  │ $REGISTRY_   │
+    │  INTERNAL_IP │  │  INTERNAL_IP │  │  INTERNAL_IP │
     │ k3s-cluster  │  │ k3s-cluster  │  │ k3s-services │
     │              │  │              │  │              │
     │ flannel.1    │  │ flannel.1    │  │ Nginx :5000  │
@@ -129,9 +134,13 @@ OVN maps each floating IP to a fixed IP (distributed NAT on the chassis):
 
 | Floating IP | Fixed IP | VM |
 |-------------|----------|----|
-| 192.168.122.204 | 10.10.0.80 | k3s-master-01 |
-| 192.168.122.202 | 10.10.0.239 | k3s-worker-01 |
-| 192.168.122.205 | 10.20.0.86 | registry-01 |
+| `$MASTER_FIP` | `$MASTER_INTERNAL_IP` | k3s-master-01 |
+| `$WORKER_FIP` | `$WORKER_INTERNAL_IP` | k3s-worker-01 |
+| `$REGISTRY_FIP` | `$REGISTRY_INTERNAL_IP` | registry-01 |
+
+The concrete addresses change on every run: read them from `devstack_env`
+(`source devstack_env`), or from `openstack floating ip list` inside the
+DevStack VM. All examples below use the same symbolic names.
 
 This is **1:1 DNAT/SNAT**. Incoming traffic to the FIP is rewritten to the
 fixed IP. Outgoing traffic from the fixed IP is rewritten to the FIP.
@@ -166,29 +175,25 @@ needs a scoped Bearer token exactly like a packet from the host.
 
 ## Data Flow Examples
 
-The addresses below come from one representative run. The authoritative values
-for your deployment are always in `devstack_env` (`MASTER_FIP`,
-`REGISTRY_FIP`, `MASTER_INTERNAL_IP`, `REGISTRY_INTERNAL_IP`).
-
 ### Example 1: SSH from host to master
 
 ```
-Host (192.168.122.1)
+Host ($VM_HOST_IP)
   → virbr0
-  → enp1s0 (192.168.122.79)
-  → OVN DNAT: 192.168.122.205 → 10.10.0.61
+  → enp1s0 ($VM_IP)
+  → OVN DNAT: $MASTER_FIP → $MASTER_INTERNAL_IP
   → br-int → tap port → master VM ens2
 ```
 
 ### Example 2: K3s worker pulls image from registry
 
 ```
-Worker (10.10.0.62)
+Worker ($WORKER_INTERNAL_IP)
   → default route → 10.10.0.1 (k3s-router)
   → router routes to 10.20.0.0/24
-  → 10.20.0.91 (registry)
-  → Nginx :5000 → auth_request /auth_validate → 401
-  → container runtime uses configs.<ip>.auth from registries.yaml
+  → $REGISTRY_INTERNAL_IP (registry)
+  → Nginx :5000 → HEAD /v2/... → auth_request /auth_validate → 401
+  → registries.yaml configs.<ip>.auth supplies the credential
   → /auth/token (Basic → Keystone) → Bearer → 200 → Zot :5002
   (No IP allow-list: in-cluster traffic is authenticated too)
 ```
@@ -196,10 +201,10 @@ Worker (10.10.0.62)
 ### Example 3: Developer pushes image from host
 
 ```
-Host (192.168.122.1)
-  → ip route: 192.168.122.200/29 via 192.168.122.79
+Host ($VM_HOST_IP)
+  → ip route: 192.168.122.200/29 via $VM_IP
   → enp1s0 → br-ex
-  → Neutron L3 NAT: 192.168.122.204 → 10.20.0.91
+  → Neutron L3 NAT: $REGISTRY_FIP → $REGISTRY_INTERNAL_IP
   → registry → Nginx :5000
   → no token → auth_request /auth_validate → 401
   → WWW-Authenticate: Bearer realm=http://FIP:5000/auth/token
@@ -211,7 +216,7 @@ Host (192.168.122.1)
 
 ## Current Flaws
 
-### 1. Asymmetric routing + rp_filter hack
+### 1. Asymmetric routing + rp_filter hack (P0)
 
 **Problem:** Packets from host to floating IPs go host→VM→br-ex→L3→VM,
 but return packets go VM→L3→br-ex→enp1s0→host (different path).
@@ -226,7 +231,7 @@ sudo sysctl -w net.ipv4.conf.br-ex.rp_filter=0
 # Keep rp_filter=1 on enp1s0 and other interfaces
 ```
 
-### 2. Single NIC for management + floating IPs
+### 2. Single NIC for management + floating IPs (P2)
 
 **Problem:** `enp1s0` handles both SSH management AND floating IP traffic.
 If OpenStack networking breaks, you lose SSH access too.
@@ -241,7 +246,7 @@ sudo virsh net-start provider
 # Attach enp2s0 to this network instead of the default NAT
 ```
 
-### 3. No MTU consideration
+### 3. No MTU consideration (P0)
 
 **Problem:** OpenStack VXLAN/Geneve tunnels add 50 bytes of overhead.
 The default MTU is 1500, but tenant VM MTU should be 1450. Large Docker
@@ -260,7 +265,7 @@ openstack network set --mtu 1450 k3s-services-net
 ```
 Then cloud-init inside VMs will set the correct MTU via DHCP.
 
-### 4. Floating IP range is tiny (6 IPs)
+### 4. Floating IP range is tiny (6 IPs) (P1)
 
 **Problem:** `FLOATING_RANGE=192.168.122.200/29` gives only 6 usable IPs
 (.200-.205). With 3 VMs, you have 3 left. Adding more VMs requires
@@ -272,7 +277,7 @@ FLOATING_RANGE=192.168.122.200/28   # 14 usable IPs
 ```
 This requires `./stack.sh` to take effect.
 
-### 5. Security groups are too permissive
+### 5. Security groups are too permissive (P1)
 
 **Problem:** Several rules use `0.0.0.0/0`:
 - `registry-sg`: port 5000 from anywhere (for auth proxy)
@@ -288,7 +293,7 @@ openstack security group rule create --remote-ip <YOUR_VPN_CIDR> \
   --protocol tcp --dst-port 5000 registry-sg
 ```
 
-### 6. No network isolation between tenants
+### 6. No network isolation between tenants (P3)
 
 **Problem:** All VMs share the same project. If you add another tenant
 later, there's no isolation — they can reach each other's internal IPs.
@@ -296,7 +301,7 @@ later, there's no isolation — they can reach each other's internal IPs.
 **Fix:** Use separate OpenStack projects with network RBAC policies,
 or use Neutron's `allowed-address-pairs` for fine-grained control.
 
-### 7. K3s Flannel uses the cluster network as transport
+### 7. K3s Flannel uses the cluster network as transport (P2)
 
 **Problem:** Flannel VXLAN encapsulates pod traffic over 10.10.0.0/24.
 This means pod-to-pod traffic between master and worker is double-encapsulated
@@ -309,7 +314,7 @@ k3s server --flannel-backend=none --disable-network-policy
 # Then install ovn-kubernetes as the CNI
 ```
 
-### 8. Registry has no dedicated internal DNS
+### 8. Registry has no dedicated internal DNS (P3)
 
 **Problem:** K3s workers reach the registry via IP (`10.20.0.91:5000`).
 If the registry VM is recreated with a new IP, every K3s config must
@@ -322,17 +327,4 @@ openstack network set --dns-domain k3s.local. k3s-services-net
 ```
 This requires `enable_dhcp=True` and `dns_publish_fixed_ip=True` on the subnet.
 
----
-
-## Improvement Roadmap
-
-| Priority | Change | Effort | Impact |
-|----------|--------|--------|--------|
-| P0 | Fix MTU to 1450 | Low | Prevents silent image push failures |
-| P0 | Restrict rp_filter to br-ex only | Low | Restores spoof protection on mgmt iface |
-| P1 | Expand FLOATING_RANGE to /28 | Medium (re-stack) | Room for more VMs |
-| P1 | Restrict security groups to known CIDRs | Low | Reduces attack surface |
-| P2 | Separate management + provider NICs | Medium | Isolates mgmt from tenant traffic |
-| P2 | OVN-Kubernetes CNI | High | Eliminates double encapsulation |
-| P3 | Internal DNS for registry | Medium | IP-independent service discovery |
-| P3 | Multi-tenant isolation | High | Proper project/network separation |
+Each flaw above is tagged with a priority (P0 = fix first, P3 = nice to have).

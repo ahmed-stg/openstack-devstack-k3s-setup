@@ -1,123 +1,116 @@
-# Private Cloud Platform — OpenStack + K3s + Auth Proxy
+# Private Cloud Platform — OpenStack + K3s + authenticated registry
 
-A fully automated private cloud platform built on a single machine:
-**OpenStack** (IaaS) → **K3s** (Kubernetes) → **Zot** (private registry) → **Keystone-authenticated deploys**.
+DevStack runs on a single host; inside it, three tenant VMs provide a K3s cluster
+and a private OCI registry (Zot) behind an Nginx + Keystone auth proxy. One
+command rebuilds the whole stack from a libvirt snapshot.
+
+```
+Host ── libvirt ── DevStack VM 192.168.122.79 (OpenStack: Keystone/Nova/Neutron/Cinder)
+                      │
+                      ├── k3s-master-01   10.10.0.x   K3s server, FIP 192.168.122.20x
+                      ├── k3s-worker-01   10.10.0.x   K3s agent,  FIP 192.168.122.20x
+                      └── registry-01     10.20.0.x   Nginx :5000 ──► Zot :5002
+                                                      └─ /auth/token ──► :5001 ──► Keystone
+```
+
+**Contents**
+
+1. [Prerequisites](#1-prerequisites)
+2. [Quick start (existing snapshot)](#2-quick-start-existing-snapshot)
+3. [Set up from scratch](#3-set-up-from-scratch)
+4. [What the automation builds](#4-what-the-automation-builds)
+5. [Push an image and deploy it](#5-push-an-image-and-deploy-it)
+6. [Security model](#6-security-model)
+7. [Verification and linting](#7-verification-and-linting)
+8. [Troubleshooting](#8-troubleshooting)
+9. [Known limitations](#9-known-limitations)
+10. [Configuration](#10-configuration)
+11. [Project structure](#11-project-structure)
+12. [Further reading](#12-further-reading)
 
 ---
 
-## Prerequisites
+## 1. Prerequisites
 
 | Requirement | Details |
-|-------------|---------|
+|---|---|
 | **OS** | Debian 12/13 or Ubuntu 22.04+ with KVM support |
-| **RAM** | 16 GB minimum (DevStack VM uses 16 GB) |
+| **RAM** | 16 GB minimum (the DevStack VM alone takes 16 GB) |
 | **Disk** | 100 GB free (80 GB for the VM + overhead) |
 | **CPU** | 6+ cores with VT-x/AMD-V |
-| **Packages** | `libvirt-bin`, `qemu-kvm`, `virtinst`, `genisoimage`, `curl`, `python3` |
-| **SSH Key** | `~/.ssh/id_ed25519` (or edit `config.env`) |
-
-Install host dependencies:
+| **SSH key** | `~/.ssh/id_ed25519` (configurable in `config.env`) |
 
 ```bash
 sudo apt update
 sudo apt install -y libvirt-daemon-system qemu-kvm virtinst genisoimage curl python3
-sudo usermod -aG libvirt $USER
-# Log out and back in for group change to take effect
+sudo usermod -aG libvirt "$USER"     # log out and back in
 ```
 
 ---
 
-## Quick Start (from snapshot)
+## 2. Quick start (existing snapshot)
 
-If you already have a DevStack VM with the `PostStack_Ready` snapshot:
+Requires a DevStack VM with the `PostStack_Ready` snapshot (see §3 for the
+one-time setup).
 
 ```bash
 git clone <repo-url> && cd final
-make vendor            # one-time: fetch the two demo images (needs internet)
-make vendor-tools      # one-time: fetch shellcheck for `make lint`
-sudo bash XX_RUN_FROM_SNAPSHOT.sh
-make verify            # independent read-only checks against the running lab
+make vendor            # one-time, needs internet: the two demo images
+make vendor-tools      # one-time, needs internet: shellcheck for `make lint`
+
+sudo bash XX_RUN_FROM_SNAPSHOT.sh   # revert + reset + steps 03-12 (~20 min)
+make verify                         # independent, read-only checks
+
+source devstack_env
+curl "$PROD_APP_URL"    # nginx:alpine
+curl "$DEMO_APP_URL"    # busybox httpd
 ```
 
-This reverts the VM, resets all state, and runs scripts 03-12 automatically.
-When it finishes, your apps are live and reachable from the host — see `DEPLOY_WORKFLOW.md` for more.
+`make vendor` and `make vendor-tools` are the only internet accesses in the
+whole flow. After that, deploys are air-gapped: scripts `11` and `12` push the
+tarballs in `vendor/` instead of pulling from Docker Hub.
 
 ---
 
-## Full Setup (from scratch)
+## 3. Set up from scratch
 
-### Step 0 — Download required binaries
-
-These files are too large for git. Download them into the project directory:
+### 3.1 Download the large binaries (not in git)
 
 ```bash
 cd final
 
-# Ubuntu 24.04 cloud image (~700 MB)
 wget -O noble-server-cloudimg-amd64.img \
-  https://cloud-images.ubuntu.com/noble/current/noble-server-cloudimg-amd64.img
-
-# K3s binary (~68 MB)
-wget -O k3s https://github.com/k3s-io/k3s/releases/download/v1.31.1+k3s1/k3s
-chmod +x k3s
-
-# K3s airgap images (~182 MB)
+  https://cloud-images.ubuntu.com/noble/current/noble-server-cloudimg-amd64.img   # ~700 MB
+wget -O k3s https://github.com/k3s-io/k3s/releases/download/v1.31.1+k3s1/k3s      # ~68 MB
 wget -O k3s-airgap-images-amd64.tar \
   https://github.com/k3s-io/k3s/releases/download/v1.31.1+k3s1/k3s-airgap-images-amd64.tar
-
-# Zot registry binary (~219 MB)
 wget -O zot-linux-amd64 \
-  https://github.com/project-zot/zot/releases/download/v2.1.16/zot-linux-amd64
-chmod +x zot-linux-amd64
+  https://github.com/project-zot/zot/releases/download/v2.1.16/zot-linux-amd64    # ~219 MB
+chmod +x k3s zot-linux-amd64
 
-# Demo images, vendored as docker-archive tarballs (~66 MB total).
-# This is the only internet access the demo needs; after this the deploy
-# scripts never contact docker.io.
-make vendor
-
-# ShellCheck static binary for `make lint` (~2.5 MB). The apt package needs
-# sudo; like the other tools, it is vendored instead.
-make vendor-tools
+make vendor && make vendor-tools
 ```
 
-The demo deploy is air-gapped: `11` and `12` push `vendor/nginx-alpine.tar`
-and `vendor/busybox.tar` from disk instead of pulling from Docker Hub.
-
-### Step 1 — Create the DevStack VM
+### 3.2 Create the VM and install DevStack
 
 ```bash
-./01_create_vm.sh
+./01_create_vm.sh    # libvirt VM: 16 GB RAM, 6 vCPU, 80 GB, 2 NICs, cloud-init
+./02_init_vm.sh      # prep the VM, clone DevStack, copy local.conf
 ```
 
-This creates a libvirt VM (16 GB RAM, 6 vCPU, 80 GB disk) with two NICs,
-cloud-init for SSH key injection, and writes `VM_IP` to `devstack_env`.
-
-### Step 2 — Install DevStack (partially manual)
-
-```bash
-./02_init_vm.sh
-```
-
-This preps the VM (DNS, interfaces, clones DevStack, transfers `local.conf`).
-**Then you must run the DevStack installer manually** (it takes 20-40 minutes):
+`02` stops before the installer; DevStack must be stacked manually (20-40 min):
 
 ```bash
 source devstack_env
-ssh ubuntu@$VM_IP
-cd ~/devstack
-./stack.sh
+ssh "ubuntu@$VM_IP"
+cd ~/devstack && ./stack.sh
+# verify inside the VM:
+source ~/devstack/openrc admin admin && openstack service list
 ```
 
-Wait for it to finish. Verify:
+### 3.3 Snapshot the working state (one-time)
 
-```bash
-source ~/devstack/openrc admin admin
-openstack service list   # should show Keystone, Nova, Neutron, Cinder
-```
-
-### Step 2.5 — Create the snapshot (manual, one-time)
-
-After DevStack installs successfully, create a snapshot so you can revert later:
+Every later run reverts to this snapshot, so take it once DevStack is healthy:
 
 ```bash
 sudo virsh shutdown BaseDevStack
@@ -127,104 +120,292 @@ sudo virsh snapshot-create-as --domain BaseDevStack \
 sudo virsh start BaseDevStack
 ```
 
-### Step 3-12 — Run the automation
-
-From this point, everything is automated:
+### 3.4 Run the automation
 
 ```bash
 sudo bash XX_RUN_FROM_SNAPSHOT.sh
 ```
 
-Or run each step individually:
+To run a single step (order matters):
 
 ```bash
 source devstack_env
 ./03_openstack_bootstrap.sh 2>&1 | tee 03.log
-./04_k3s_master_vm.sh       2>&1 | tee 04.log
-./05_registry_vm.sh          2>&1 | tee 05.log
-./06_zot_install.sh         2>&1 | tee 06.log
-./07_auth_proxy_vm.sh       2>&1 | tee 07.log
-./08_auth_proxy_install.sh  2>&1 | tee 08.log
-./09_k3s_cluster_install.sh 2>&1 | tee 09.log
-./10_registry_smoke_test.sh 2>&1 | tee 10.log
-./11_enable_zot_auth.sh     2>&1 | tee 11.log
+# ...
 ./12_demo_deploy.sh         2>&1 | tee 12.log
 ```
 
-### Deploy your first app
+---
 
-Apps are already exposed by script 12. To curl them:
+## 4. What the automation builds
+
+| Step | Script | Result |
+|---|---|---|
+| 03 | `03_openstack_bootstrap.sh` | project + user, quotas, 2 tenant networks + router, `Ubuntu24` image, keypair, `auth-proxy-system` app credential |
+| 04 | `04_k3s_master_vm.sh` | `k3s-master-01`, security group, floating IP, host route, `br-ex` config |
+| 05 | `05_registry_vm.sh` | `registry-01` + 20 GB Cinder volume + floating IP |
+| 06 | `06_zot_install.sh` | Zot binary, volume formatted/mounted, systemd unit, airgap images imported |
+| 07 | `07_auth_proxy_vm.sh` | no VM: aliases `AUTH_PROXY_*` to the registry VM |
+| 08 | `08_auth_proxy_install.sh` | RSA keypair, `lib/token_service.py`, Zot moved to `127.0.0.1:5002`, Nginx on `:5000` |
+| 09 | `09_k3s_cluster_install.sh` | `k3s-worker-01`, K3s server/agent, `registries.yaml` (mirrors + `configs.<ip>.auth`), kubeconfig |
+| 10 | `10_registry_smoke_test.sh` | Nginx auth enforcement, 7 hard gates + catalog check |
+| 11 | `11_enable_zot_auth.sh` | deploy credential, push `my-app:v1` from the vendored tar, pod `prod-app` |
+| 12 | `12_demo_deploy.sh` | NodePort services, push `demo-app:v1`, curl both apps from the host |
+| 99 | `99_teardown.sh` | destroys everything in dependency order (dry-run by default) |
+
+Why the stack looks like this, per-step internals and the design decisions are in
+**[ARCHITECTURE.md](ARCHITECTURE.md)**.
+
+---
+
+## 5. Push an image and deploy it
 
 ```bash
 source devstack_env
-curl $PROD_APP_URL    # nginx:alpine
-curl $DEMO_APP_URL    # busybox httpd
+echo "$AUTH_PROXY_FIP"        # registry + auth proxy (external)
+echo "$REGISTRY_INTERNAL_IP"  # what the K3s nodes pull from
+echo "$KUBECONFIG_PATH"       # k3s-kubeconfig.yaml
 ```
 
-See **[DEPLOY_WORKFLOW.md](DEPLOY_WORKFLOW.md)** for the full push-to-deploy guide.
+> **No TLS.** `nginx:5000` and Zot speak plain HTTP, so the application
+> credential, the JWTs and the image blobs cross the network in cleartext, and
+> clients must pass `--dest-tls-verify=false`. That is acceptable only because
+> this runs on a host-local libvirt network; see §6.
 
----
+### 5.1 Create an application credential
 
-## Verification & Linting
+Each deployment gets its own Keystone application credential — the "robot
+account" the cluster uses to pull:
 
 ```bash
-make lint     # bash -n + shellcheck + py_compile over every tracked script
-make verify   # read-only checks against the live lab
+APP_CRED_JSON=$(ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+  -o GlobalKnownHostsFile=/dev/null -o LogLevel=ERROR -i "$VM_SSH_KEY" "ubuntu@$VM_IP" \
+  "bash -lc 'source ~/k3s-user-openrc.sh 2>/dev/null; \
+   openstack application credential create my-deploy-$(date +%s) --unrestricted -f json'" 2>/dev/null)
+
+APP_ID=$(echo "$APP_CRED_JSON"     | python3 -c "import sys,json; s=''.join(sys.stdin); d=json.loads(s[s.index('{'):]); print(d.get('id'))")
+APP_SECRET=$(echo "$APP_CRED_JSON" | python3 -c "import sys,json; s=''.join(sys.stdin); d=json.loads(s[s.index('{'):]); print(d.get('secret'))")
 ```
 
-`make lint` needs no lab and finishes in seconds; `hooks/pre-commit` calls it once
-you enable `git config core.hooksPath hooks`. `verify.sh` deliberately does not read
-`03.log`…`12.log`: it re-derives every claim from the running system (both apps
-200, nodes 2/2, VXLAN both directions, 401/200/scope-rejection on the registry,
-all 8 mirrored images), so a green log cannot hide a broken deployment.
+Keystone decides *who* you are; the token service then signs the scope the client
+asks for. The **token** is checked per request (`repository:<name>:pull|push`),
+the **credential** is not repository-scoped. For a hard allow-list, set
+`ALLOWED_REPOS='my-app,demo-app,rancher/*'` in the token service environment on
+the registry VM.
+
+### 5.2 Push
+
+From the master, using the vendored tarball (no external registry contacted):
+
+```bash
+scp -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+    -o GlobalKnownHostsFile=/dev/null -o LogLevel=ERROR \
+    -i "$VM_SSH_KEY" vendor/nginx-alpine.tar "ubuntu@$MASTER_FIP:~/nginx-alpine.tar"
+
+ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+    -o GlobalKnownHostsFile=/dev/null -o LogLevel=ERROR \
+    -i "$VM_SSH_KEY" "ubuntu@$MASTER_FIP" <<EOF
+skopeo copy --dest-username='$APP_ID' --dest-password='$APP_SECRET' \
+  --dest-tls-verify=false \
+  docker-archive:/home/ubuntu/nginx-alpine.tar:nginx:alpine \
+  docker://$AUTH_PROXY_FIP:5000/my-app:v1
+rm -f /home/ubuntu/nginx-alpine.tar
+EOF
+```
+
+An arbitrary image works the same way with `docker://docker.io/library/<image>:<tag>`
+as the source — but that needs egress from the master, outside the air-gap claim.
+To build your own image, use `buildah` on the master (also needs internet for the
+base image), then `buildah push --tls-verify=false --creds=$APP_ID:$APP_SECRET
+my-app:v1 docker://$AUTH_PROXY_FIP:5000/my-app:v1`.
+
+### 5.3 ImagePullSecret
+
+Nodes read the credential from `registries.yaml` (`configs.<ip>.auth`, written by
+`09`); pods get it from the secret below. Neither is optional: Nginx
+authenticates every client, including in-cluster ones.
+
+```bash
+IR="${REGISTRY_INTERNAL_IP}:5000"
+kubectl --kubeconfig "$KUBECONFIG_PATH" create secret docker-registry registry-auth \
+  --docker-server="$IR" --docker-username="$APP_ID" --docker-password="$APP_SECRET" \
+  --dry-run=client -o yaml | kubectl --kubeconfig "$KUBECONFIG_PATH" apply -f -
+```
+
+### 5.4 Deploy and check
+
+```bash
+cat <<YAML | kubectl --kubeconfig "$KUBECONFIG_PATH" apply -f -
+apiVersion: v1
+kind: Pod
+metadata:
+  name: my-app
+  labels: { app: my-app }
+spec:
+  containers:
+  - name: app
+    image: ${IR}/my-app:v1
+  imagePullSecrets:
+  - name: registry-auth
+YAML
+
+kubectl --kubeconfig "$KUBECONFIG_PATH" wait --for=condition=Ready pod/my-app --timeout=120s
+kubectl --kubeconfig "$KUBECONFIG_PATH" get pods -o wide
+```
+
+To expose it from the host, add a `NodePort` Service (selector `app: my-app`)
+and open TCP 30000-32767 in the node security groups — exactly what `12` does
+for the two demo apps.
 
 ---
 
-## Project Structure
+## 6. Security model
 
+**No IP exemption.** Authorisation is a Bearer token with a scope; a packet from
+`10.10.0.0/24` needs one exactly like a packet from the host. Security groups
+decide *reachability* only.
+
+| Client | Authenticates with | May do |
+|---|---|---|
+| External (host, CI) | Basic app credential → `/auth/token` → Bearer | only the requested scopes, re-checked against `access` on every request |
+| K3s node (containerd) | `registries.yaml` `configs.<ip>.auth` | pull mirrored repositories (one token per pull) |
+| Pod | imagePullSecret | same as the node, for its own image |
+| Anonymous | — | 401 on every `/v2/` request |
+
+The validator checks signature, `iss`, `aud`, `nbf`, `exp` **and** that `access`
+grants `repository:<name>:<pull|push>` for the actual request (Nginx forwards
+`X-Original-URI`/`X-Original-Method`, because `auth_request` subrequests are
+always `GET`). Malformed scopes are rejected with 400, denials are logged.
+
+**Cleartext, by design.** There is no TLS on the registry: `nginx:5000` serves
+plain HTTP and every client passes `--dest-tls-verify=false`. Credentials,
+tokens and image layers are unencrypted on the wire. This is tolerable only on
+the isolated libvirt host network; anything reachable beyond it needs TLS
+termination first.
+
+Remaining risks and the deferred work around them are listed in §9.
+
+---
+
+## 7. Verification and linting
+
+```bash
+make lint     # bash -n + shellcheck 0.10.0 + py_compile, no lab needed
+make verify   # read-only checks against the running lab
 ```
-final/
-├── 01_create_vm.sh            # Create libvirt VM
-├── 02_init_vm.sh              # Prep VM for DevStack
-├── 03_openstack_bootstrap.sh  # Project, networks, quotas, keypair
-├── 04_k3s_master_vm.sh        # K3s master VM + floating IP
-├── 05_registry_vm.sh          # Registry VM + Cinder volume + FIP
-├── 06_zot_install.sh          # Install Zot, format volume, import images
-├── 07_auth_proxy_vm.sh        # Alias AUTH_PROXY_* to the registry VM (no 4th VM)
-├── 08_auth_proxy_install.sh   # Nginx + token service; Zot moved to loopback
-├── 09_k3s_cluster_install.sh  # Worker VM, K3s server/agent, registries.yaml auth
-├── 10_registry_smoke_test.sh  # Nginx auth enforcement + 7 hard gates
-├── 11_enable_zot_auth.sh      # Push the vendored nginx tar, deploy a pod
-├── 12_demo_deploy.sh          # NodePort services, push the vendored busybox
-├── 99_teardown.sh             # Destroy the lab (dry-run default; untested by design)
-├── XX_RUN_FROM_SNAPSHOT.sh    # Revert + reset + full stack (03-12)
-├── XX_revert_to_snapshot.sh   # virsh snapshot revert
-├── XX_reset_rerun_state.sh    # Reset env vars + clean artifacts
-├── verify.sh                  # Independent, read-only verification of the live lab
-├── Makefile                   # make lint / vendor / run / verify / teardown
-├── ci/lint.sh                 # bash -n + shellcheck + py_compile over tracked files
-├── hooks/pre-commit           # Runs ci/lint.sh (git config core.hooksPath hooks)
-├── DEPLOY_WORKFLOW.md         # Push-to-deploy user guide
-├── ARCHITECTURE.md            # Detailed technical writeup
-├── NETWORKING.md              # Networking deep dive + improvement roadmap
-├── TODO.md                    # Prioritised hardening plan and status
-├── config.env                 # Base VM config (RAM, vCPUs)
-├── devstack_env               # Runtime state (IPs, credentials)
-├── local.conf                 # DevStack configuration
-├── lib/common.sh              # Shared functions (SSH, OpenStack wrappers)
-├── lib/token_service.py       # Token service, single source (installed by 08)
-├── configure_br_ex.sh         # OVS bridge setup on DevStack VM
-├── import_images.sh           # Skopeo airgap image import
-├── scp-safe / ssh-safe        # SSH wrappers (bypass known-hosts)
-├── source_env.sh              # Source devstack_env helper
-└── vendor/                    # Ignored: offline binaries + the two demo tars
+
+`hooks/pre-commit` runs the linter once you enable it:
+
+```bash
+git config core.hooksPath hooks
+```
+
+`verify.sh` deliberately ignores `03.log`…`12.log` — a green log can hide a
+broken deployment, so it re-derives everything from the live system:
+
+- host `curl` of both NodePort apps → 200
+- K3s nodes `Ready` 2/2, both pods `Running` and `Ready`
+- cross-node pod→pod traffic in both directions (VXLAN actually works)
+- the worker security group rule that permits it
+- registry behaviour: no token → 401, token issued, scoped pull → 200,
+  pull-only token rejected on push, all 8 mirrored images present
+- both pods really run images from the private registry
+- no `000000` artefacts in the recorded logs
+
+**Latest results**
+
+| Check | Result |
+|---|---|
+| `./ci/lint.sh` (22 scripts + 1 python file) | clean |
+| `10_registry_smoke_test.sh` T1-T7 + catalog | all PASS |
+| `11.log` / `12.log` `docker.io` occurrences | 0 / 0 |
+| `./verify.sh` | 18 passed, 0 failed |
+| `XX_RUN_FROM_SNAPSHOT.sh` from `PostStack_Ready` | see §9 note; re-run after the last `09` fix |
+
+---
+
+## 8. Troubleshooting
+
+**`No valid host was found`** (Nova placement) — the hypervisor is out of disk
+(`ds1G` needs ~10 GB free):
+
+```bash
+source devstack_env
+ssh "ubuntu@$VM_IP" "bash -lc 'source ~/devstack/openrc admin admin; openstack hypervisor stats show -f json'"
+```
+
+**`REMOTE HOST IDENTIFICATION HAS CHANGED`** — stale key from a previous VM:
+
+```bash
+ssh-keygen -f ~/.ssh/known_hosts -R 192.168.122.204
+```
+
+**`stack.sh` fails** — check the Python version (3.10-3.12), AppArmor blocking
+libvirt (`sudo aa-complain /usr/sbin/libvirtd`), and free disk (~30 GB needed).
+
+**Pod stuck in `ImagePullBackOff`** — check `kubectl describe pod <name>`:
+
+| Symptom | Cause / fix |
+|---|---|
+| `server gave HTTP response to HTTPS client` | `registries.yaml` lacks the explicit `mirrors."<registry-ip>:5000"` entry, so k3s generated an https-only `certs.d/.../hosts.toml`. Re-run `09` (a `*` wildcard does not apply to a directly-referenced host). |
+| `501 Unsupported method POST` | stale token service on the registry VM; `lib/token_service.py` handles POST — re-run `08`. |
+| `authentication required` | wrong credential in the imagePullSecret or `registries.yaml`; nothing is exempt from auth, so recreate the rotated credential. |
+| `401 ... scope does not grant` in `journalctl -u token-service` | the JWT's `access` claim does not cover this repo/action — mint the token with `repository:<name>:pull` (or `:push`). |
+
+**Floating IPs unreachable from the host** — a host route is required:
+
+```bash
+source devstack_env
+sudo ip route replace 192.168.122.200/29 via "$VM_IP"
 ```
 
 ---
 
-## Configuration
+## 9. Known limitations
 
-### `config.env` — VM hardware settings
+This is a learning platform, not production. Honest accounting:
+
+| Limitation | Impact | Mitigation |
+|---|---|---|
+| **HTTP-only registry** | credentials, JWTs, image data in cleartext (§6) | terminate TLS at Nginx and drop `--dest-tls-verify=false`; or keep it host-local |
+| **JWT signing key on disk** | VM compromise leaks the signer | secrets manager / HSM in production |
+| **App credential in a K8s Secret** | anyone with `get secrets` can extract it | short-lived tokens or a credential operator |
+| **No K8s RBAC / network policies** | any pod can reach the API | Pod Security Standards + NetworkPolicy |
+| **Credential can mint any scope** | the token is scoped, the credential is not | `ALLOWED_REPOS` allow-list in the token service |
+| **No rate limit / revocation on `/auth/token`** | brute force is possible | put an OAuth2/OIDC provider in front |
+| **No image signing** | any push can be deployed | cosign / Notary |
+| **One SSH key everywhere** | one key compromise opens everything | per-role keys, bastion |
+| **DevStack admin password in `local.conf`** | it is DevStack's documented sample default, not a leak; the tenant openrc is generated at runtime and gitignored | change all four passwords for anything real |
+| **Teardown never executed** | `99_teardown.sh` is written and reviewed but untested against a live stack | run it with no flags first (dry-run), then `--yes` under supervision |
+| **Nested virtualisation is slow, no monitoring, single VM per role** | build/pull latency, silent failures, SPOF | accept for a demo; Prometheus + HA for real |
+
+Network-specific weaknesses (asymmetric routing / `rp_filter`, MTU, tiny floating
+IP range, permissive security groups, double encapsulation, no registry DNS) and
+their fixes are in **[NETWORKING.md](NETWORKING.md)**.
+
+**Deferred work** — deliberately not done:
+
+- TLS on the registry (see above).
+- `chmod 600` on the JWT key, rate limiting, token revocation.
+- Reproducibility: pre-seed the 629 MB cloud image into the snapshot so `03`
+  stops re-uploading it; an idempotency sweep (`03`→`12` twice without revert);
+  per-step timings in the `XX_` summary.
+- `kubeconform` over the rendered manifests.
+
+**Run history**
+
+| Run | Result |
+|---|---|
+| token service unit tests (22 pure-function + 7 HTTP) | 22/22, 7/7 pass |
+| `verify.sh` on the pre-hardening lab | 17 passed, 1 failed — caught a pull-only token accepted on push |
+| `verify.sh` on the hardened lab | 18 passed, 0 failed |
+| clean `XX_RUN_FROM_SNAPSHOT.sh` from `PostStack_Ready` | recorded after the final run (§7) |
+
+---
+
+## 10. Configuration
+
+**`config.env`** — VM hardware:
 
 ```bash
 export VM_NAME="BaseDevStack"
@@ -237,112 +418,66 @@ export K3S_AIRGAP_IMAGES="./k3s-airgap-images-amd64.tar"
 export WORKER_COUNT=1
 ```
 
-### `local.conf` — DevStack settings
+**`local.conf`** — DevStack: `LIBVIRT_TYPE=kvm`,
+`FLOATING_RANGE=192.168.122.200/29` (6 usable IPs),
+`PUBLIC_INTERFACE=enp2s0`, `ENABLED_SERVICES` = Keystone, Nova, Neutron (OVN),
+Cinder, Glance, Placement.
 
-Key values:
-- `LIBVIRT_TYPE=kvm` — uses KVM (change to `qemu` if no hardware virtualization)
-- `FLOATING_RANGE=192.168.122.200/29` — 6 floating IPs
-- `PUBLIC_INTERFACE=enp2s0` — second NIC for br-ex
-- `ENABLED_SERVICES` — Keystone, Nova, Neutron (OVN), Cinder, Glance, Placement
-
-### `devstack_env` — Runtime state (auto-generated)
-
-Do not edit manually. Scripts persist IPs, tokens, and credentials here.
-Reset with `XX_reset_rerun_state.sh` or `XX_RUN_FROM_SNAPSHOT.sh`.
+**`devstack_env`** — runtime state (IPs, credentials) persisted by the scripts.
+Do not edit; reset it with `XX_reset_rerun_state.sh` or by reverting the snapshot.
 
 ---
 
-## Known Issues & Security Flaws
+## 11. Project structure
 
-This project is a **learning/demo platform**. Several shortcuts were taken
-that would be unacceptable in production. Here's an honest accounting:
-
-### Security
-
-| Issue | Severity | Details |
-|-------|----------|---------|
-| **HTTP-only registry** | High | Nginx and Zot listen on plain HTTP. All credentials and image data travel unencrypted. In production, add TLS termination (Let's Encrypt or self-signed certs with `--dest-tls-verify=false` removed). |
-| **JWT secret on disk** | Medium | The RSA private key (`auth-proxy-jwt.pem`) is stored on the registry VM's filesystem. A VM compromise leaks the signing key. In production, use a secrets manager or HSM. |
-| **Application Credential in K8s Secret** | Medium | The Keystone app credential is stored as a K8s `imagePullSecret`. Anyone with `kubectl get secrets` can extract it. In production, use short-lived tokens or a credential operator. |
-| **No RBAC on K8s** | Medium | The K3s cluster runs with default RBAC. Any pod can access the Kubernetes API. In production, apply Pod Security Standards and network policies. |
-| **DevStack admin password in plaintext** | Medium | `local.conf` contains `ADMIN_PASSWORD=nomoresecret`, which is DevStack's documented sample default, not a leaked secret. The tenant `k3s-user-openrc.sh` is generated on the DevStack VM at runtime and gitignored. In production, use Keystone tokens with expiry. |
-| **SSH key reuse** | Low | The same SSH key is used for the DevStack VM, all tenant VMs, and the OpenStack keypair. Compromise of one key compromises everything. |
-| **No image signing/verification** | Low | Zot accepts any pushed image without signature verification. A compromised push could deploy malicious code. Use cosign or Notary for image signing. |
-| **Token service is a single Python script** | Low | It validates signature, `iss`, `aud`, `nbf`, `exp` and the `access` scope, and logs every denial, but has no rate limiting, no request audit trail and no token revocation. A brute-force attack on `/auth/token` is still possible. In production, use a proper OAuth2/OIDC provider. |
-| **Credential can mint any scope** | Medium | Once Keystone accepts an application credential, `/auth/token` will sign whatever valid scope the client asks for. The token is checked on use, but the *credential* is not repository-scoped. Mitigation: set `ALLOWED_REPOS` (globs, e.g. `my-app,demo-app,rancher/*`) in the token service environment. |
-
-### Logistical / Operational
-
-| Issue | Impact | Mitigation |
-|-------|--------|------------|
-| **Nova placement failures** | Worker VMs may fail to schedule if disk is full. The `ds1G` flavor (10 GB disk) is a tight fit. | Monitor hypervisor disk with `openstack hypervisor stats show`. Use smaller images or increase host disk. |
-| **Floating IP exhaustion** | Only 6 floating IPs in `192.168.122.200/29`. Each VM needs one. | Expand `FLOATING_RANGE` in `local.conf` before running DevStack (requires re-stack). |
-| **No persistence across reboots** | DevStack is not designed for reboot survival. The VM must be snapshotted. | Always `sudo virsh snapshot-create-as` after a working state. Revert on failure. |
-| **Nested virtualization is slow** | Tenant VMs run as QEMU-inside-QEMU. Build times and image pulls are noticeably slower than bare-metal. | Use `LIBVIRT_TYPE=kvm` if the host supports it. Accept the latency for a demo. |
-| **br-ex must be reconfigured after revert** | The OVS bridge loses its IP on snapshot revert. Script `04` handles this automatically via `configure_br_ex.sh`. | If manual intervention is needed: `sudo ip addr add 192.168.122.201/29 dev br-ex` inside the DevStack VM. |
-| **MTU issues with VXLAN** | OpenStack's default MTU is 1450 (VXLAN overhead). Large Docker pushes may time out. | Set `DOCKER_CLIENT_MTU=1450` or configure Neutron with `segment_mtu`. |
-| **Single point of failure** | One DevStack VM, one registry VM. If either dies, the entire platform is down. | In production: HA DevStack (3 controllers), replicated registry, load-balanced auth proxy. |
-| **No monitoring or alerting** | There is no Prometheus, Grafana, or logging stack. Failures are silent. | Add the K3s monitoring chart or deploy Prometheus Operator after step 11. |
-| **Teardown script is untested** | `99_teardown.sh` deletes everything in dependency order and is dry-run by default, but it was written and reviewed without ever being run against a live stack. | Run `./99_teardown.sh` first (lists resources), then `./99_teardown.sh --yes` under supervision. |
-
----
-
-## Troubleshooting
-
-### `No valid host was found` (Nova placement error)
-
-The hypervisor doesn't have enough disk. Check:
-```bash
-source devstack_env
-ssh ubuntu@$VM_IP "bash -lc 'source ~/devstack/openrc admin admin; openstack hypervisor stats show -f json'"
 ```
-Free disk must be > 10 GB for a `ds1G` worker. Delete failed servers:
-```bash
-ssh ubuntu@$VM_IP "bash -lc 'source ~/k3s-user-openrc.sh; openstack server list -f value -c Name -c Status'"
-```
-
-### SSH `REMOTE HOST IDENTIFICATION HAS CHANGED`
-
-Stale known_hosts entries from previous VMs. Fix:
-```bash
-ssh-keygen -f ~/.ssh/known_hosts -R 192.168.122.204  # or whichever IP
-```
-Or use the cleanup in `XX_RUN_FROM_SNAPSHOT.sh` which clears the whole range.
-
-### DevStack `stack.sh` fails
-
-Common causes:
-- **Python version mismatch**: DevStack needs Python 3.10-3.12. Check with `python3 --version`.
-- **AppArmor blocking libvirt**: `sudo aa-complain /usr/sbin/libvirtd` on the host.
-- **Disk full**: DevStack needs ~30 GB free. Check with `df -h` inside the VM.
-
-### Pod stuck in `ImagePullBackOff`
-
-Check the pod events:
-```bash
-kubectl --kubeconfig k3s-kubeconfig.yaml describe pod <name>
-```
-Common causes:
-- **501 Unsupported method POST**: the token service needs its `do_POST` handler. It lives in `lib/token_service.py` (installed by `08`); re-run `08` if the copy on the registry VM is stale.
-- **`ImagePullBackOff` + `server gave HTTP response to HTTPS client`**: `registries.yaml` is missing the explicit `mirrors."<registry-ip>:5000"` entry. A `*` wildcard does not apply to a directly-referenced registry host, so k3s generated an https-only `certs.d/.../hosts.toml`. Re-run `09` (or add the mirror and restart `k3s`/`k3s-agent`).
-- **authentication required**: The credential in `registries.yaml` (nodes) or the imagePullSecret (pods) is wrong. There is no IP allow-list: in-cluster pulls authenticate with the application credential exactly like external clients. Recreate the secret/credential if it was rotated.
-- **401 with `deny ... scope does not grant`** in `journalctl -u token-service`: the JWT's `access` claim does not cover this repository/action. Mint the token with the right scope (`repository:<name>:pull` or `:push`); a pull token can never push.
-- **unknown**: Registry may be unreachable from the worker. Check security groups (reachability) — but note that security groups no longer imply authorisation.
-
-### Cannot reach floating IPs from host
-
-You need a host route:
-```bash
-source devstack_env
-sudo ip route replace 192.168.122.200/29 via $VM_IP
+final/
+├── 01_create_vm.sh            # libvirt VM for DevStack
+├── 02_init_vm.sh              # prep the VM, transfer local.conf
+├── 03_openstack_bootstrap.sh  # project, networks, quotas, keypair, app credential
+├── 04_k3s_master_vm.sh        # K3s master VM + floating IP + host route
+├── 05_registry_vm.sh          # registry VM + Cinder volume + floating IP
+├── 06_zot_install.sh          # Zot, volume, systemd, airgap image import
+├── 07_auth_proxy_vm.sh        # alias AUTH_PROXY_* to the registry VM (no 4th VM)
+├── 08_auth_proxy_install.sh   # Nginx, token service, Zot on loopback
+├── 09_k3s_cluster_install.sh  # worker VM, K3s server/agent, registries.yaml auth
+├── 10_registry_smoke_test.sh  # auth enforcement + 7 hard gates
+├── 11_enable_zot_auth.sh      # push vendored nginx tar, deploy prod-app
+├── 12_demo_deploy.sh          # NodePort services, vendored busybox, curl from host
+├── 99_teardown.sh             # destroy the lab (dry-run default; never executed)
+├── XX_RUN_FROM_SNAPSHOT.sh    # revert + reset + steps 03-12
+├── XX_revert_to_snapshot.sh   # virsh snapshot revert
+├── XX_reset_rerun_state.sh    # reset env vars, clean artifacts
+├── verify.sh                  # independent read-only verification
+├── Makefile                   # lint / vendor / vendor-tools / run / verify / teardown
+├── ci/lint.sh                 # bash -n + shellcheck + py_compile
+├── ci/containers-policy.json  # skopeo copy policy
+├── hooks/pre-commit           # runs ci/lint.sh (core.hooksPath=hooks)
+├── lib/common.sh              # SSH/OpenStack helpers, wait loops
+├── lib/token_service.py       # token service, single source (installed by 08)
+├── README.md                  # this file
+├── ARCHITECTURE.md            # design, per-step internals, decisions, lessons
+├── NETWORKING.md              # network layers, data flows, network flaws
+├── config.env                 # VM hardware settings
+├── local.conf                 # DevStack configuration
+├── devstack_env               # runtime state (generated, gitignored)
+├── configure_br_ex.sh         # OVS bridge / routing inside the DevStack VM
+├── import_images.sh           # skopeo airgap image import
+├── source_env.sh              # source devstack_env helper
+├── scp-safe / ssh-safe        # SSH wrappers that bypass known_hosts
+└── vendor/                    # gitignored: offline binaries + demo image tars
 ```
 
 ---
 
-## References
+## 12. Further reading
 
-- [DevStack Documentation](https://docs.openstack.org/devstack/latest/)
-- [K3s Documentation](https://docs.k3s.io/)
-- [Zot Registry](https://github.com/project-zot/zot)
-- [OpenStack Application Credentials](https://docs.openstack.org/keystone/latest/user/application_credentials.html)
-- [Docker Registry Auth Spec](https://distribution.github.io/distribution/spec/auth/)
+- **[ARCHITECTURE.md](ARCHITECTURE.md)** — component design, what each step does
+  internally, authorisation flow, design decisions and lessons learned.
+- **[NETWORKING.md](NETWORKING.md)** — every network layer from `virbr0` to
+  VXLAN, three data-flow walkthroughs, network flaws and their fixes.
+
+References: [DevStack](https://docs.openstack.org/devstack/latest/),
+[K3s](https://docs.k3s.io/), [Zot](https://github.com/project-zot/zot),
+[Keystone application credentials](https://docs.openstack.org/keystone/latest/user/application_credentials.html),
+[Registry auth spec](https://distribution.github.io/distribution/spec/auth/).

@@ -1,21 +1,9 @@
-# Zero to Hero: Building a Private Cloud Platform with OpenStack + K3s
+# Architecture
 
-## Overview
-
-This project transforms a single bare-metal machine running DevStack into a
-fully operational private cloud platform with:
-
-- **OpenStack** — IaaS layer (Keystone, Nova, Neutron, Cinder)
-- **K3s** — Lightweight Kubernetes cluster (1 master + 1 worker)
-- **Zot** — Private OCI container registry with Cinder-backed storage
-- **Nginx + Token Service** — Auth proxy integrated into the registry VM
-- **Keystone Application Credentials** — K8s pulls images with OpenStack-native auth
-
-The entire stack is reproducible from a single command:
-
-```bash
-sudo bash XX_RUN_FROM_SNAPSHOT.sh
-```
+How the platform is put together: the components, what each script does
+internally, and why the design ended up this way. Read
+**[README.md](README.md)** first for the pitch, the quick start and the security
+model; networking has its own document, **[NETWORKING.md](NETWORKING.md)**.
 
 ---
 
@@ -224,8 +212,10 @@ Installs Nginx + Token Service on the registry VM:
    (frees port 5000 for Nginx, avoids port conflict)
 4. **Nginx** — Reverse proxy on `0.0.0.0:5000`:
    - `/auth/token` → Token Service (127.0.0.1:5001)
-   - `/v2/` → Zot (127.0.0.1:5002)
+   - `/v2/` → Zot (127.0.0.1:5002), gated by `auth_request /auth/validate`
    - Zero network latency between proxy and registry (localhost)
+   - Plain HTTP, no TLS: credentials, tokens and blobs are cleartext on the
+     host-local network (see README §6)
 
 ### Step 09 — K3s Cluster Install
 
@@ -277,17 +267,12 @@ Configures Nginx auth enforcement:
    - malformed scope on `/auth/token` → 400 (no crash)
    - the Zot catalog contains all 8 mirrored `rancher/…` images
 
-### Authorisation Model (summary)
+### Authorisation
 
-| Client | How it authenticates | What it may do |
-|--------|----------------------|----------------|
-| External (host, CI) | Basic app credential → `/auth/token` → Bearer | only the scopes it requested, re-checked against `access` on every request |
-| K3s node (containerd) | `registries.yaml` `configs.<ip>.auth` | pull the mirrored repositories; a token is minted per pull |
-| Pod | imagePullSecret | same as the node, for the pod's image |
-| Anonymous | — | 401 on every `/v2/` request |
-
-There is no IP-based exemption: being on `10.10.0.0/24` or `10.20.0.0/24` buys
-nothing. Security-group rules only decide *reachability*, not authorisation.
+Four kinds of client (external, node, pod, anonymous) all end up at the same
+`auth_request` gate; the matrix of what each one may do is in
+**[README.md §6](README.md#6-security-model)**. The point worth repeating here:
+there is no IP-based exemption, so security groups only decide *reachability*.
 
 ### Step 11 — Deployment Flow Demo
 
@@ -372,43 +357,6 @@ Already installed on the master VM for airgap image import.
 
 ---
 
-## File Reference
-
-| File | Purpose |
-|------|---------|
-| `config.env` | Base VM configuration (RAM, vCPUs, disk) |
-| `devstack_env` | Runtime state (IPs, credentials, persisted by scripts) |
-| `lib/common.sh` | Shared functions (SSH helpers, OpenStack wrappers, wait loops) |
-| `01_create_vm.sh` | Create the DevStack libvirt VM |
-| `02_init_vm.sh` | Install DevStack inside the VM |
-| `03_openstack_bootstrap.sh` | Project, networks, quotas, keypair, app credential |
-| `04_k3s_master_vm.sh` | Create K3s master VM with floating IP |
-| `05_registry_vm.sh` | Create registry VM with Cinder volume + floating IP |
-| `06_zot_install.sh` | Install Zot, format volume, import airgap images |
-| `07_auth_proxy_vm.sh` | Aliases auth-proxy IPs to the registry IPs (no VM) |
-| `08_auth_proxy_install.sh` | Install Nginx, `lib/token_service.py`, move Zot to loopback |
-| `09_k3s_cluster_install.sh` | Create worker VM, install K3s server + agent |
-| `10_registry_smoke_test.sh` | Configure Nginx auth enforcement, test with curl |
-| `11_enable_zot_auth.sh` | End-to-end: push image, deploy pod |
-| `12_demo_deploy.sh` | Expose apps via NodePort, push busybox httpd, curl from host |
-| `99_teardown.sh` | Destroy the lab in dependency order (dry-run default, untested) |
-| `verify.sh` | Independent read-only verification of the live platform |
-| `Makefile` | `lint`, `vendor`, `vendor-tools`, `run`, `verify`, `teardown` |
-| `ci/lint.sh` | `bash -n` + `shellcheck` + `py_compile` over tracked files |
-| `hooks/pre-commit` | Runs `ci/lint.sh` when `core.hooksPath=hooks` |
-| `lib/token_service.py` | Registry token service (single source of truth) |
-| `TODO.md` | Prioritised hardening plan and acceptance criteria |
-| `XX_RUN_FROM_SNAPSHOT.sh` | Revert + reset + run full stack (03-12) |
-| `XX_revert_to_snapshot.sh` | virsh snapshot revert (needs sudo) |
-| `XX_reset_rerun_state.sh` | Reset devstack_env to base values |
-| `DEPLOY_WORKFLOW.md` | User guide for push-to-deploy |
-| `configure_br_ex.sh` | Configure OVS bridge on DevStack VM |
-| `import_images.sh` | Skopeo-based airgap image import script |
-| `scp-safe` / `ssh-safe` | SSH wrappers with known-hosts bypass |
-| `source_env.sh` | Source devstack_env helper |
-
----
-
 ## OpenStack Services Used
 
 | Service | Role in This Project |
@@ -436,25 +384,6 @@ size of the flavors, while the whole DevStack overlay is about 6.3 GB on the
 host's 80 GB disk. Sizing an instance by its flavor therefore over-commits
 the hypervisor disk, which is why the worker uses `ds1G` (10 GB) and the
 registry keeps its data on a separate Cinder volume instead of its root disk.
-
----
-
-## Quick Start
-
-```bash
-# 0. One-time, needs internet: the two demo images and shellcheck
-make vendor && make vendor-tools
-
-# 1. One command to build everything from a clean snapshot
-sudo bash XX_RUN_FROM_SNAPSHOT.sh
-
-# 2. Verify without trusting the logs
-make verify
-
-# 3. Deploy your first app (see DEPLOY_WORKFLOW.md for details)
-source devstack_env
-# ... follow the one-liner in DEPLOY_WORKFLOW.md
-```
 
 ---
 
