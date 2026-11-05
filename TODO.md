@@ -228,6 +228,12 @@ works for push.
 | `11` first attempt | `./11_enable_zot_auth.sh` | push OK, pod `ImagePullBackOff`: certs.d host had an https-only `server` line (fixed in `09`) |
 | `11`/`12` after the registry fix | `./11_enable_zot_auth.sh && ./12_demo_deploy.sh` | both EXIT=0, 0 `docker.io`, 0 `000000`; worker pulled `my-app` fresh in 2.2 s through the token flow |
 | `verify.sh` | `./verify.sh` against the finished lab | **18 passed, 0 failed** |
+
+Note on coverage: the 09 registry-config fix was applied to the two running
+nodes with the exact template the script now renders, and the resulting
+`hosts.toml` + a real 2.2 s image pull were verified. A *fresh* 03→12 run has
+not been repeated after that one-line template change (it would wipe the current
+lab); the template itself is byte-for-byte what was tested.
 | lint | `./ci/lint.sh` over 22 tracked scripts | OK |
 
 Rollback point for the pre-hardening state: `PRE_HARDENING_COMMIT.txt` (gitignored)
