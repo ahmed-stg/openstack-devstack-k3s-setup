@@ -43,8 +43,7 @@ prompt.txt
 scripts.md
 RUN_ORDER.md
 help-commands.txt
-# personal interview preparation (never committed)
-.interview-prep.md
+notes.md
 
 # ── Python caches (ci/lint.sh) ──
 __pycache__/
