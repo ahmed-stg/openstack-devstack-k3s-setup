@@ -4,7 +4,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 # shellcheck disable=SC1091
-source "$SCRIPT_DIR/lib/common.sh"
+source "$SCRIPT_DIR/../lib/common.sh"
 load_env
 require_env AUTH_PROXY_FIP AUTH_PROXY_INTERNAL_IP REGISTRY_INTERNAL_IP VM_IP
 require_env AUTH_PROXY_APP_CRED_ID AUTH_PROXY_APP_CRED_SECRET
@@ -22,7 +22,7 @@ if [[ ! -f "$AUTH_PROXY_JWT_KEY_LOCAL" ]]; then
 fi
 
 # Python Token Service — single source of truth, shared with 10's checks.
-tmp_token_service="$SCRIPT_DIR/lib/token_service.py"
+tmp_token_service="$SCRIPT_DIR/../lib/token_service.py"
 [[ -f "$tmp_token_service" ]] || fail "missing $tmp_token_service"
 
 # Nginx Config — proxies to Zot on localhost (same VM)

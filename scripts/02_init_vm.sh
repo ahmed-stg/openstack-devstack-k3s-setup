@@ -1,5 +1,7 @@
 #!/bin/bash
 # 02_init_vm.sh
+# Run from anywhere: paths below are relative to the repo root.
+cd "$(dirname "$0")/.." || exit 1
 
 # Load the IP from the first script
 if [ -f "./devstack_env" ]; then

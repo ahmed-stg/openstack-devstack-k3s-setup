@@ -4,7 +4,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 # shellcheck disable=SC1091
-source "$SCRIPT_DIR/lib/common.sh"
+source "$SCRIPT_DIR/../lib/common.sh"
 load_env
 require_env VM_IP MASTER_FIP MASTER_INTERNAL_IP REGISTRY_INTERNAL_IP K3S_BINARY_PATH
 require_env AUTH_PROXY_APP_CRED_ID AUTH_PROXY_APP_CRED_SECRET

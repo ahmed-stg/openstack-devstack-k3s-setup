@@ -1,4 +1,10 @@
-# ── Large binaries (download with wget, see README.md) ──
+# ── Large binaries (download into images/, see README.md) ──
+images/noble-server-cloudimg-amd64.img
+images/k3s
+images/k3s-airgap-images-amd64.tar
+images/zot-linux-amd64
+images/skopeo
+# legacy locations (still ignored after the reorganisation)
 noble-server-cloudimg-amd64.img
 k3s
 k3s-airgap-images-amd64.tar
@@ -37,6 +43,8 @@ prompt.txt
 scripts.md
 RUN_ORDER.md
 help-commands.txt
+# personal interview preparation (never committed)
+.interview-prep.md
 
 # ── Python caches (ci/lint.sh) ──
 __pycache__/

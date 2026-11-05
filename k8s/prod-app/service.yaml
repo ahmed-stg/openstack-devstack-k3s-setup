@@ -1,0 +1,17 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: prod-app-svc
+  labels:
+    app: prod-app
+spec:
+  # NodePort is a deliberate lab constraint (Traefik is disabled, there is no
+  # Ingress controller and no TLS). See README "Known limitations".
+  type: NodePort
+  selector:
+    app: prod-app
+  ports:
+    - name: http
+      port: 80
+      targetPort: http
+      protocol: TCP

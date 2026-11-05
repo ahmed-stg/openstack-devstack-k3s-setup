@@ -1,5 +1,7 @@
 #!/bin/bash
 # 01_create_vm.sh
+# Run from anywhere: paths below are relative to the repo root.
+cd "$(dirname "$0")/.." || exit 1
 
 # --- CONFIGURATION ---
 SSH_KEY_PUB="$HOME/.ssh/id_ed25519.pub"
@@ -7,7 +9,7 @@ VM_NAME="BaseDevStack"
 VM_RAM=16284
 VM_VCPUS=6
 DISK_SIZE="80G"
-BASE_IMAGE="./noble-server-cloudimg-amd64.img"
+BASE_IMAGE="${BASE_IMAGE:-images/noble-server-cloudimg-amd64.img}"
 POOL_PATH="/var/lib/libvirt/images"
 VM_DISK="$POOL_PATH/$VM_NAME.qcow2"
 CLOUD_INIT_ISO="$POOL_PATH/$VM_NAME-cidata.iso"

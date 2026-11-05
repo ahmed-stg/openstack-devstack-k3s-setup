@@ -8,8 +8,9 @@
 set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+ROOT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 # shellcheck disable=SC1091
-source "$SCRIPT_DIR/lib/common.sh"
+source "$SCRIPT_DIR/../lib/common.sh"
 load_env
 require_env MASTER_FIP REGISTRY_INTERNAL_IP REGISTRY_FIP KUBECONFIG_PATH PROD_APP_URL DEMO_APP_URL
 require_env AUTH_PROXY_APP_CRED_ID AUTH_PROXY_APP_CRED_SECRET WORKER_FIP
@@ -27,8 +28,10 @@ http_code() {
     printf '%s' "$code"
 }
 
+K=(kubectl --kubeconfig "$KUBECONFIG_PATH")
+
 echo "== 1. reachability from the host =="
-FLOAT_RANGE="$(grep -oP '^FLOATING_RANGE=\K.*' "$SCRIPT_DIR/local.conf" 2>/dev/null || true)"
+FLOAT_RANGE="$(grep -oP '^FLOATING_RANGE=\K.*' "$ROOT_DIR/local.conf" 2>/dev/null || true)"
 FLOAT_NET="${FLOAT_RANGE%%/*}"
 if [[ -n "$FLOAT_NET" ]] && ip route | grep -q "$FLOAT_NET"; then
     ok "host route to $FLOAT_RANGE exists"
@@ -43,7 +46,6 @@ DEMO_CODE=$(http_code "$DEMO_APP_URL")
     || bad "demo-app $DEMO_APP_URL -> $DEMO_CODE"
 
 echo "== 2. cluster state =="
-K=(kubectl --kubeconfig "$KUBECONFIG_PATH")
 NODES_TOTAL=$("${K[@]}" get nodes --no-headers 2>/dev/null | wc -l)
 NODES_READY=$("${K[@]}" get nodes --no-headers 2>/dev/null | awk '$2 == "Ready"' | wc -l)
 if (( NODES_TOTAL >= 2 && NODES_READY == NODES_TOTAL )); then
@@ -52,33 +54,74 @@ else
     bad "nodes Ready: ${NODES_READY}/${NODES_TOTAL}"
 fi
 for app in prod-app demo-app; do
-    phase=$("${K[@]}" get pod "$app" -o jsonpath='{.status.phase}' 2>/dev/null || true)
-    ready=$("${K[@]}" get pod "$app" -o jsonpath='{.status.containerStatuses[0].ready}' 2>/dev/null || true)
-    [[ "$phase" == "Running" && "$ready" == "true" ]] \
-        && ok "$app is Running and Ready" || bad "$app is phase=$phase ready=$ready"
+    desired=$("${K[@]}" get deploy "$app" -o jsonpath='{.spec.replicas}' 2>/dev/null || true)
+    available=$("${K[@]}" get deploy "$app" -o jsonpath='{.status.availableReplicas}' 2>/dev/null || true)
+    if [[ -n "$desired" && "$available" == "$desired" ]]; then
+        ok "$app Deployment available: ${available}/${desired}"
+    else
+        bad "$app Deployment available: ${available:-0}/${desired:-?}"
+    fi
+    ready_pods=$("${K[@]}" get pods -l "app=$app" \
+        -o jsonpath='{range .items[*]}{.status.containerStatuses[0].ready}{"\n"}{end}' 2>/dev/null \
+        | grep -c '^true$')
+    [[ "$ready_pods" == "$desired" ]] \
+        && ok "$app pods Ready: ${ready_pods}/${desired}" \
+        || bad "$app pods Ready: ${ready_pods}/${desired:-?}"
 done
 
-echo "== 3. cross-node data path (VXLAN) =="
-PROD_NODE=$("${K[@]}" get pod prod-app -o jsonpath='{.spec.nodeName}' 2>/dev/null || true)
-PROD_IP=$("${K[@]}" get pod prod-app -o jsonpath='{.status.podIP}' 2>/dev/null || true)
-DEMO_IP=$("${K[@]}" get pod demo-app -o jsonpath='{.status.podIP}' 2>/dev/null || true)
-case "$PROD_NODE" in
-    *master*) bad "prod-app runs on the master ($PROD_NODE); the cross-node path is untested" ;;
-    "")       bad "could not determine prod-app's node" ;;
-    *)        ok "prod-app runs on ${PROD_NODE} (cross-node path is exercised)" ;;
-esac
-if "${K[@]}" exec demo-app -- wget -q -O /dev/null --timeout=8 "http://${PROD_IP}/" >/dev/null 2>&1; then
-    ok "master pod ${DEMO_IP} -> worker pod ${PROD_IP} (VXLAN)"
+echo "== 3. workload hygiene (probes, resources, PDB, rollout) =="
+for app in prod-app demo-app; do
+    probes=$("${K[@]}" get deploy "$app" -o jsonpath='{.spec.template.spec.containers[0].readinessProbe.httpGet.path}{" "}{.spec.template.spec.containers[0].livenessProbe.httpGet.path}' 2>/dev/null || true)
+    [[ "$probes" == "/ /" ]] && ok "$app has readiness and liveness probes" \
+        || bad "$app probes are '${probes:-none}' (expected '/ /')"
+
+    limits=$("${K[@]}" get deploy "$app" -o jsonpath='{.spec.template.spec.containers[0].resources.requests.cpu}{" "}{.spec.template.spec.containers[0].resources.limits.cpu}' 2>/dev/null || true)
+    [[ -n "$limits" && "$limits" != " " ]] && ok "$app has CPU requests and limits ($limits)" \
+        || bad "$app has no resource requests/limits"
+
+    min_avail=$("${K[@]}" get pdb "$app" -o jsonpath='{.spec.minAvailable}' 2>/dev/null || true)
+    [[ "$min_avail" =~ ^[1-9] ]] && ok "$app PDB minAvailable=$min_avail" \
+        || bad "$app has no effective PDB (minAvailable=${min_avail:-none})"
+
+    max_unavail=$("${K[@]}" get deploy "$app" -o jsonpath='{.spec.strategy.rollingUpdate.maxUnavailable}' 2>/dev/null || true)
+    [[ "$max_unavail" == "0" ]] && ok "$app rollout maxUnavailable=0" \
+        || bad "$app rollout maxUnavailable=${max_unavail:-unset}"
+done
+
+echo "== 4. cross-node data path (VXLAN) =="
+mapfile -t POD_ROWS < <("${K[@]}" get pods -l 'app in (prod-app,demo-app)' \
+    -o jsonpath='{range .items[*]}{.metadata.name}|{.spec.nodeName}|{.status.podIP}{"\n"}{end}' 2>/dev/null)
+SRC_NAME=""; SRC_NODE=""; SRC_IP=""; DST_NAME=""; DST_NODE=""; DST_IP=""
+for ((i = 0; i < ${#POD_ROWS[@]}; i++)); do
+    IFS='|' read -r n1 node1 ip1 <<< "${POD_ROWS[i]}"
+    for ((j = 0; j < ${#POD_ROWS[@]}; j++)); do
+        IFS='|' read -r n2 node2 ip2 <<< "${POD_ROWS[j]}"
+        if [[ -n "$node1" && -n "$node2" && "$node1" != "$node2" ]]; then
+            SRC_NAME="$n1"; SRC_NODE="$node1"; SRC_IP="$ip1"
+            DST_NAME="$n2"; DST_NODE="$node2"; DST_IP="$ip2"
+            break 2
+        fi
+    done
+done
+if [[ -n "$SRC_NAME" ]]; then
+    ok "cross-node pod pair found: $SRC_NAME ($SRC_NODE) <-> $DST_NAME ($DST_NODE)"
 else
-    bad "master pod ${DEMO_IP} -> worker pod ${PROD_IP} (VXLAN)"
+    bad "no two pods on different nodes (cross-node path untested)"
 fi
-if "${K[@]}" exec prod-app -- wget -q -O /dev/null --timeout=8 "http://${DEMO_IP}/" >/dev/null 2>&1; then
-    ok "worker pod ${PROD_IP} -> master pod ${DEMO_IP} (reverse)"
-else
-    bad "worker pod ${PROD_IP} -> master pod ${DEMO_IP} (reverse)"
+if [[ -n "$SRC_NAME" ]]; then
+    if "${K[@]}" exec "$SRC_NAME" -- wget -q -O /dev/null --timeout=8 "http://${DST_IP}/" >/dev/null 2>&1; then
+        ok "$SRC_NODE pod ${SRC_IP} -> $DST_NODE pod ${DST_IP} (VXLAN)"
+    else
+        bad "$SRC_NODE pod ${SRC_IP} -> $DST_NODE pod ${DST_IP} (VXLAN)"
+    fi
+    if "${K[@]}" exec "$DST_NAME" -- wget -q -O /dev/null --timeout=8 "http://${SRC_IP}/" >/dev/null 2>&1; then
+        ok "$DST_NODE pod ${DST_IP} -> $SRC_NODE pod ${SRC_IP} (reverse)"
+    else
+        bad "$DST_NODE pod ${DST_IP} -> $SRC_NODE pod ${SRC_IP} (reverse)"
+    fi
 fi
 
-echo "== 4. security group rule that allows the VXLAN =="
+echo "== 5. security group rule that allows the VXLAN =="
 SG_JSON="$(vm_openstack tenant "openstack security group rule list k3s-worker-sg -f json" 2>/dev/null || true)"
 if printf '%s' "$SG_JSON" | python3 -c '
 import json, sys
@@ -94,7 +137,7 @@ else
     bad "k3s-worker-sg is missing the protocol=any / 10.10.0.0/24 ingress rule"
 fi
 
-echo "== 5. registry: auth and content =="
+echo "== 6. registry: auth and content =="
 REGISTRY_URL="http://${REGISTRY_FIP}:5000"
 CODE=$(http_code "${REGISTRY_URL}/v2/")
 [[ "$CODE" == "401" ]] && ok "external /v2/ without a token -> 401" \
@@ -133,18 +176,18 @@ else
     bad "missing from Zot:${MISSING}"
 fi
 
-echo "== 6. images really come from the private registry =="
+echo "== 7. images really come from the private registry =="
 for app in prod-app demo-app; do
-    image=$("${K[@]}" get pod "$app" -o jsonpath='{.spec.containers[0].image}' 2>/dev/null || true)
+    image=$("${K[@]}" get deploy "$app" -o jsonpath='{.spec.template.spec.containers[0].image}' 2>/dev/null || true)
     case "$image" in
         "${REGISTRY_INTERNAL_IP}:5000/"*) ok "$app image is ${image}" ;;
         *) bad "$app image is '${image}' (not the private registry)" ;;
     esac
 done
 
-echo "== 7. no 000000 artefacts in the recorded logs =="
-if compgen -G "$SCRIPT_DIR/*.log" >/dev/null; then
-    if grep -R "000000" "$SCRIPT_DIR"/*.log >/dev/null 2>&1; then
+echo "== 8. no 000000 artefacts in the recorded logs =="
+if compgen -G "$ROOT_DIR/*.log" >/dev/null; then
+    if grep -R "000000" "$ROOT_DIR"/*.log >/dev/null 2>&1; then
         bad "found '000000' in *.log"
     else
         ok "no '000000' in *.log"

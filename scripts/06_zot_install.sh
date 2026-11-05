@@ -4,7 +4,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 # shellcheck disable=SC1091
-source "$SCRIPT_DIR/lib/common.sh"
+source "$SCRIPT_DIR/../lib/common.sh"
 load_env
 require_env REGISTRY_FIP REGISTRY_INTERNAL_IP K3S_IMAGES_PATH ZOT_BINARY_PATH
 
@@ -17,7 +17,7 @@ if [[ ! -f "$ZOT_BINARY_PATH" ]]; then
     chmod +x "$ZOT_BINARY_PATH"
 fi
 
-SKOPEO_BINARY_PATH="$ROOT_DIR/skopeo"
+SKOPEO_BINARY_PATH="$ROOT_DIR/images/skopeo"
 if [[ ! -f "$SKOPEO_BINARY_PATH" ]]; then
     log "Downloading Skopeo binary on host..."
     # Using a reliable static build of skopeo
@@ -100,14 +100,14 @@ fi
 log "Pushing K3s airgap images to Zot using host-downloaded Skopeo."
 
 log "Installing Skopeo and JQ on Master VM."
-./scp-safe -i "$VM_SSH_KEY" "$SKOPEO_BINARY_PATH" "${SSH_USER}@${MASTER_FIP}:~/skopeo"
-./ssh-safe -i "$VM_SSH_KEY" "${SSH_USER}@${MASTER_FIP}" "sudo install -m 0755 ~/skopeo /usr/local/bin/skopeo && sudo apt-get update -qq && sudo apt-get install -y -qq jq"
+"$SCRIPT_DIR/scp-safe" -i "$VM_SSH_KEY" "$SKOPEO_BINARY_PATH" "${SSH_USER}@${MASTER_FIP}:~/skopeo"
+"$SCRIPT_DIR/ssh-safe" -i "$VM_SSH_KEY" "${SSH_USER}@${MASTER_FIP}" "sudo install -m 0755 ~/skopeo /usr/local/bin/skopeo && sudo apt-get update -qq && sudo apt-get install -y -qq jq"
 
 log "Copying import script and images to Master VM."
-./scp-safe -i "$VM_SSH_KEY" "$SCRIPT_DIR/import_images.sh" "${SSH_USER}@${MASTER_FIP}:~/import_images.sh"
-./scp-safe -i "$VM_SSH_KEY" "$K3S_IMAGES_PATH" "${SSH_USER}@${MASTER_FIP}:/home/${SSH_USER}/k3s-airgap-images.tar"
+"$SCRIPT_DIR/scp-safe" -i "$VM_SSH_KEY" "$SCRIPT_DIR/import_images.sh" "${SSH_USER}@${MASTER_FIP}:~/import_images.sh"
+"$SCRIPT_DIR/scp-safe" -i "$VM_SSH_KEY" "$K3S_IMAGES_PATH" "${SSH_USER}@${MASTER_FIP}:/home/${SSH_USER}/k3s-airgap-images.tar"
 
 log "Importing images into Zot from Master VM."
-./ssh-safe -i "$VM_SSH_KEY" "${SSH_USER}@${MASTER_FIP}" "REGISTRY_INTERNAL_IP=$REGISTRY_INTERNAL_IP bash ~/import_images.sh"
+"$SCRIPT_DIR/ssh-safe" -i "$VM_SSH_KEY" "${SSH_USER}@${MASTER_FIP}" "REGISTRY_INTERNAL_IP=$REGISTRY_INTERNAL_IP bash ~/import_images.sh"
 
 log "Airgap images imported into Zot."

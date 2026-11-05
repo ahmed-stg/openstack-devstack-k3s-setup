@@ -23,6 +23,21 @@ if (( ${#PYFILES[@]} > 0 )); then
     python3 -m py_compile "${PYFILES[@]}" || status=1
 fi
 
+if [[ -d tests ]]; then
+    echo "== unit tests (token service) =="
+    python3 -m unittest discover -s tests -p 'test_*.py' -q || status=1
+fi
+
+if command -v kubectl >/dev/null 2>&1; then
+    echo "== kustomize render =="
+    for dir in k8s/*/; do
+        if ! kubectl kustomize "$dir" >/dev/null; then
+            echo "FAIL: kubectl kustomize $dir" >&2
+            status=1
+        fi
+    done
+fi
+
 if [[ -x "$SHELLCHECK" ]]; then
     echo "== shellcheck (${#SCRIPTS[@]} files) =="
     "$SHELLCHECK" -x -S warning "${SCRIPTS[@]}" || status=1

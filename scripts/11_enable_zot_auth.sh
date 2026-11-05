@@ -4,7 +4,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 # shellcheck disable=SC1091
-source "$SCRIPT_DIR/lib/common.sh"
+source "$SCRIPT_DIR/../lib/common.sh"
 load_env
 require_env KUBECONFIG_PATH REGISTRY_INTERNAL_IP AUTH_PROXY_FIP MASTER_FIP
 
@@ -45,7 +45,7 @@ fi
 # The image is vendored as a docker-archive tarball (see README "download required
 # binaries"). Nothing is fetched from docker.io at deploy time: the platform is
 # air-gapped from the moment the offline bundle is assembled.
-NGINX_TAR="$SCRIPT_DIR/vendor/nginx-alpine.tar"
+NGINX_TAR="$SCRIPT_DIR/../vendor/nginx-alpine.tar"
 [[ -f "$NGINX_TAR" ]] || fail "vendored image not found: $NGINX_TAR — run 'make vendor' on a machine with internet access"
 
 log "Step 2: Pushing vendored nginx:alpine to Auth Proxy via Skopeo (on Master VM)."
@@ -85,25 +85,13 @@ kubectl --kubeconfig "$KUBECONFIG_PATH" create secret docker-registry registry-a
   --docker-password="$APP_SECRET" \
   --dry-run=client -o yaml | kubectl --kubeconfig "$KUBECONFIG_PATH" apply -f -
 
-# 4. Deploy Pod
-log "Step 4: Deploying a Pod that pulls from the internal registry."
-cat <<EOF | kubectl --kubeconfig "$KUBECONFIG_PATH" apply -f -
-apiVersion: v1
-kind: Pod
-metadata:
-  name: prod-app
-  labels:
-    app: prod-app   # the Service created by 12 selects on this label
-spec:
-  containers:
-  - name: app
-    image: $INTERNAL_REGISTRY/my-app:v1
-  imagePullSecrets:
-  - name: registry-auth
-EOF
+# 4. Deploy the workload from the tracked kustomization
+log "Step 4: Applying the prod-app Deployment (k8s/prod-app via kustomize)."
+k8s_apply "$K8S_DIR/prod-app" "$INTERNAL_REGISTRY"
 
-log "Step 5: Waiting for pod to be ready."
-kubectl --kubeconfig "$KUBECONFIG_PATH" wait --for=condition=Ready pod/prod-app --timeout=120s
+log "Step 5: Waiting for the Deployment to roll out (2 replicas, probes)."
+kubectl --kubeconfig "$KUBECONFIG_PATH" rollout status deployment/prod-app --timeout=180s
+kubectl --kubeconfig "$KUBECONFIG_PATH" get deploy,pods -l app=prod-app -o wide
 
 log "=== DEPLOYMENT FLOW COMPLETE ==="
 log "Architecture Summary:"

@@ -36,7 +36,7 @@ Host ── libvirt ── DevStack VM 192.168.122.79 (OpenStack: Keystone/Nova/
 |---|---|
 | **OS** | Debian 12/13 or Ubuntu 22.04+ with KVM support |
 | **RAM** | 16 GB minimum (the DevStack VM alone takes 16 GB) |
-| **Disk** | 100 GB free (80 GB for the VM + overhead) |
+
 | **CPU** | 6+ cores with VT-x/AMD-V |
 | **SSH key** | `~/.ssh/id_ed25519` (configurable in `config.env`) |
 
@@ -326,13 +326,7 @@ broken deployment, so it re-derives everything from the live system:
 
 ## 8. Troubleshooting
 
-**`No valid host was found`** (Nova placement) — the hypervisor is out of disk
-(`ds1G` needs ~10 GB free):
 
-```bash
-source devstack_env
-ssh "ubuntu@$VM_IP" "bash -lc 'source ~/devstack/openrc admin admin; openstack hypervisor stats show -f json'"
-```
 
 **`REMOTE HOST IDENTIFICATION HAS CHANGED`** — stale key from a previous VM:
 
@@ -341,7 +335,7 @@ ssh-keygen -f ~/.ssh/known_hosts -R 192.168.122.204
 ```
 
 **`stack.sh` fails** — check the Python version (3.10-3.12), AppArmor blocking
-libvirt (`sudo aa-complain /usr/sbin/libvirtd`), and free disk (~30 GB needed).
+libvirt (`sudo aa-complain /usr/sbin/libvirtd`).
 
 **Pod stuck in `ImagePullBackOff`** — check `kubectl describe pod <name>`:
 

@@ -4,7 +4,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 # shellcheck disable=SC1091
-source "$SCRIPT_DIR/lib/common.sh"
+source "$SCRIPT_DIR/../lib/common.sh"
 load_env
 require_env KUBECONFIG_PATH MASTER_FIP MASTER_SG AUTH_PROXY_FIP \
   AUTH_PROXY_APP_CRED_ID AUTH_PROXY_APP_CRED_SECRET \
@@ -39,26 +39,11 @@ EOF
 # ── Part A: Expose the existing prod-app (nginx:alpine from script 11) ──
 log_section "Part A: Expose prod-app (nginx:alpine)"
 
-# 11 already labels the pod; keep this as a safety net for pods created before
-# that fix (it is idempotent and never fails the run).
-kubectl --kubeconfig "$KUBECONFIG_PATH" label pod prod-app app=prod-app --overwrite >/dev/null 2>&1 || true
-kubectl --kubeconfig "$KUBECONFIG_PATH" wait --for=condition=Ready pod/prod-app --timeout=180s
+kubectl --kubeconfig "$KUBECONFIG_PATH" rollout status deployment/prod-app --timeout=180s
 
-# Create a NodePort Service
-log "Creating NodePort Service for prod-app."
-cat <<YAML | kubectl --kubeconfig "$KUBECONFIG_PATH" apply -f -
-apiVersion: v1
-kind: Service
-metadata:
-  name: prod-app-svc
-spec:
-  type: NodePort
-  selector:
-    app: prod-app
-  ports:
-  - port: 80
-    targetPort: 80
-YAML
+# Apply the tracked manifests (Deployment + NodePort Service + PDB).
+log "Applying prod-app Deployment and NodePort Service (kustomize)."
+k8s_apply "$K8S_DIR/prod-app" "${REGISTRY_INTERNAL_IP}:5000"
 
 PROD_NODE_PORT=$(kubectl --kubeconfig "$KUBECONFIG_PATH" get svc prod-app-svc \
   -o jsonpath='{.spec.ports[0].nodePort}')
@@ -116,7 +101,7 @@ persist_env PROD_APP_URL "$PROD_APP_URL"
 log_section "Part B: Push busybox, deploy custom HTTP server"
 
 log "Pushing vendored busybox:latest to private registry as demo-app:v1 ..."
-BUSYBOX_TAR="$SCRIPT_DIR/vendor/busybox.tar"
+BUSYBOX_TAR="$SCRIPT_DIR/../vendor/busybox.tar"
 [[ -f "$BUSYBOX_TAR" ]] || fail "vendored image not found: $BUSYBOX_TAR — run 'make vendor' on a machine with internet access"
 scp "${SSH_BASE_OPTS[@]}" -i "$VM_SSH_KEY" "$BUSYBOX_TAR" \
     "${SSH_USER}@${MASTER_FIP}:/home/${SSH_USER}/busybox.tar"
@@ -143,58 +128,14 @@ rm -f /home/${SSH_USER}/busybox.tar
 echo "busybox pushed successfully."
 REMOTEEOF
 
-# Deploy demo-app
+# Deploy demo-app from the tracked kustomization (Deployment + ConfigMap page
+# + NodePort Service + PDB). The container runs unprivileged on :8080.
 INTERNAL_REGISTRY="${REGISTRY_INTERNAL_IP}:5000"
-log "Deploying demo-app (busybox httpd with custom page)."
-cat <<YAML | kubectl --kubeconfig "$KUBECONFIG_PATH" apply -f -
-apiVersion: v1
-kind: Pod
-metadata:
-  name: demo-app
-  labels:
-    app: demo-app
-spec:
-  containers:
-  - name: app
-    image: ${INTERNAL_REGISTRY}/demo-app:v1
-    command: ["/bin/sh", "-c"]
-    args:
-    - |
-      mkdir -p /www
-      printf '%s\n' \
-        '<!DOCTYPE html>' \
-        '<html><head><title>Cloud Demo App</title></head>' \
-        '<body>' \
-        '<h1>Hello from the Private Cloud!</h1>' \
-        '<p>Served by <strong>BusyBox httpd</strong> in a K3s pod.</p>' \
-        '<p>Image pushed through the <strong>authenticated Nginx/Zot registry</strong></p>' \
-        '<p>and pulled by K3s over the <strong>internal network</strong>.</p>' \
-        '</body></html>' > /www/index.html
-      httpd -f -p 80 -h /www
-    ports:
-    - containerPort: 80
-  imagePullSecrets:
-  - name: registry-auth
-YAML
+log "Applying demo-app Deployment and NodePort Service (kustomize)."
+k8s_apply "$K8S_DIR/demo-app" "$INTERNAL_REGISTRY"
 
-log "Waiting for demo-app to be ready..."
-kubectl --kubeconfig "$KUBECONFIG_PATH" wait --for=condition=Ready pod/demo-app --timeout=120s
-
-# Create NodePort Service for demo-app
-log "Creating NodePort Service for demo-app."
-cat <<YAML | kubectl --kubeconfig "$KUBECONFIG_PATH" apply -f -
-apiVersion: v1
-kind: Service
-metadata:
-  name: demo-app-svc
-spec:
-  type: NodePort
-  selector:
-    app: demo-app
-  ports:
-  - port: 80
-    targetPort: 80
-YAML
+log "Waiting for the demo-app Deployment to roll out..."
+kubectl --kubeconfig "$KUBECONFIG_PATH" rollout status deployment/demo-app --timeout=180s
 
 sleep 3
 

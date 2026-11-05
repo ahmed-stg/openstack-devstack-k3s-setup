@@ -1,0 +1,14 @@
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: prod-app
+  labels:
+    app: prod-app
+spec:
+  # Two replicas, at most one voluntarily disrupted: a node drain can evict one
+  # pod, but the Deployment can never be reduced to zero by maintenance.
+  minAvailable: 1
+  unhealthyPodEvictionPolicy: AlwaysAllow
+  selector:
+    matchLabels:
+      app: prod-app

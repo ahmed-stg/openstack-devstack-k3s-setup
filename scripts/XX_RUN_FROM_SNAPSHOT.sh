@@ -1,16 +1,18 @@
 #!/bin/bash
 # XX_RUN_FROM_SNAPSHOT.sh
 # Revert DevStack VM to PostStack_Ready snapshot, reset state, and run the full stack.
-# Usage: sudo bash XX_RUN_FROM_SNAPSHOT.sh   (sudo needed for virsh)
+# Usage (from the repo root): sudo bash scripts/XX_RUN_FROM_SNAPSHOT.sh
+#   sudo is needed for virsh; the step scripts themselves run unprivileged.
 
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-cd "$SCRIPT_DIR"
+ROOT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+cd "$ROOT_DIR"
 
 VM_NAME="BaseDevStack"
 SNAPSHOT="PostStack_Ready"
-DEVSTACK_ENV_FILE="$SCRIPT_DIR/devstack_env"
+DEVSTACK_ENV_FILE="$ROOT_DIR/devstack_env"
 
 # ── 0. Pre-flight: ensure devstack_env has the base VM info ──────────
 if [[ ! -f "$DEVSTACK_ENV_FILE" ]]; then
@@ -45,27 +47,27 @@ EOF
 
 # --- Generated keys & credentials ---
 rm -f \
-    "$SCRIPT_DIR/auth-proxy-jwt.pem" \
-    "$SCRIPT_DIR/auth-proxy-jwt.pub.pem" \
-    "$SCRIPT_DIR/k3s-key.pem" \
-    "$SCRIPT_DIR/k3s-user-openrc.sh" \
-    "$SCRIPT_DIR/k3s-kubeconfig.yaml" \
-    "$SCRIPT_DIR/master_fip.txt"
+    "$ROOT_DIR/auth-proxy-jwt.pem" \
+    "$ROOT_DIR/auth-proxy-jwt.pub.pem" \
+    "$ROOT_DIR/k3s-key.pem" \
+    "$ROOT_DIR/k3s-user-openrc.sh" \
+    "$ROOT_DIR/k3s-kubeconfig.yaml" \
+    "$ROOT_DIR/master_fip.txt"
 
 # --- Step logs (fresh run produces new ones) ---
-rm -f "$SCRIPT_DIR"/{03,04,05,06,07,08,09,10,11,12}.log
-rm -f "$SCRIPT_DIR"/{3,4,5,6,7}.log          # old naming
-rm -f "$SCRIPT_DIR"/revert.log "$SCRIPT_DIR"/reset.log
+rm -f "$ROOT_DIR"/{03,04,05,06,07,08,09,10,11,12}.log
+rm -f "$ROOT_DIR"/{3,4,5,6,7}.log          # old naming
+rm -f "$ROOT_DIR"/revert.log "$ROOT_DIR"/reset.log
 
 # --- Retry / debug logs from previous attempts ---
-rm -f "$SCRIPT_DIR"/*_retry*.log
-rm -f "$SCRIPT_DIR"/*_test_run.log
-rm -f "$SCRIPT_DIR"/*_retry_merged.log
-rm -f "$SCRIPT_DIR"/*_retry_final*.log
+rm -f "$ROOT_DIR"/*_retry*.log
+rm -f "$ROOT_DIR"/*_test_run.log
+rm -f "$ROOT_DIR"/*_retry_merged.log
+rm -f "$ROOT_DIR"/*_retry_final*.log
 
 # --- Old markdown logs ---
-rm -f "$SCRIPT_DIR"/{3,4,5,6,7}log.md
-rm -f "$SCRIPT_DIR"/k3slog.md
+rm -f "$ROOT_DIR"/{3,4,5,6,7}log.md
+rm -f "$ROOT_DIR"/k3slog.md
 
 # Clear stale SSH known-hosts for the floating IP range
 for ip in $(seq 200 210); do
@@ -78,10 +80,10 @@ echo "      Env reset. Keys, logs, and stale SSH entries cleaned."
 run_step() {
     local number="$1"
     local script="$2"
-    local log_file="${number}.log"
+    local log_file="$ROOT_DIR/${number}.log"
 
     printf '\n═══ Step %s: %s ═══\n' "$number" "$script"
-    if ! "./$script" 2>&1 | tee "$log_file"; then
+    if ! "$SCRIPT_DIR/$script" 2>&1 | tee "$log_file"; then
         echo "" >&2
         echo "ERROR: step $number ($script) failed — see $log_file" >&2
         exit 1

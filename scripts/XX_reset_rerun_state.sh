@@ -3,7 +3,8 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-DEVSTACK_ENV_FILE="$SCRIPT_DIR/devstack_env"
+ROOT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+DEVSTACK_ENV_FILE="$ROOT_DIR/devstack_env"
 
 if [[ ! -f "$DEVSTACK_ENV_FILE" ]]; then
     echo "ERROR: $DEVSTACK_ENV_FILE not found" >&2
@@ -26,21 +27,21 @@ $vm_ssh_key_line
 EOF
 
 rm -f \
-    "$SCRIPT_DIR/auth-proxy-jwt.pem" \
-    "$SCRIPT_DIR/auth-proxy-jwt.pub.pem" \
-    "$SCRIPT_DIR/k3s-key.pem" \
-    "$SCRIPT_DIR/k3s-user-openrc.sh" \
-    "$SCRIPT_DIR/k3s-kubeconfig.yaml" \
-    "$SCRIPT_DIR/master_fip.txt" \
-    "$SCRIPT_DIR"/{03,04,05,06,07,08,09,10,11}.log \
-    "$SCRIPT_DIR"/{3,4,5,6,7}.log \
-    "$SCRIPT_DIR"/revert.log \
-    "$SCRIPT_DIR"/reset.log \
-    "$SCRIPT_DIR"/*_retry*.log \
-    "$SCRIPT_DIR"/*_test_run.log \
-    "$SCRIPT_DIR"/*_retry_merged.log \
-    "$SCRIPT_DIR"/*_retry_final*.log \
-    "$SCRIPT_DIR"/{3,4,5,6,7}log.md \
-    "$SCRIPT_DIR"/k3slog.md
+    "$ROOT_DIR/auth-proxy-jwt.pem" \
+    "$ROOT_DIR/auth-proxy-jwt.pub.pem" \
+    "$ROOT_DIR/k3s-key.pem" \
+    "$ROOT_DIR/k3s-user-openrc.sh" \
+    "$ROOT_DIR/k3s-kubeconfig.yaml" \
+    "$ROOT_DIR/master_fip.txt" \
+    "$ROOT_DIR"/{03,04,05,06,07,08,09,10,11}.log \
+    "$ROOT_DIR"/{3,4,5,6,7}.log \
+    "$ROOT_DIR"/revert.log \
+    "$ROOT_DIR"/reset.log \
+    "$ROOT_DIR"/*_retry*.log \
+    "$ROOT_DIR"/*_test_run.log \
+    "$ROOT_DIR"/*_retry_merged.log \
+    "$ROOT_DIR"/*_retry_final*.log \
+    "$ROOT_DIR"/{3,4,5,6,7}log.md \
+    "$ROOT_DIR"/k3slog.md
 
 echo "Reset devstack_env to VM base values and removed generated rerun artifacts."

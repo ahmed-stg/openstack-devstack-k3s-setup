@@ -1,7 +1,8 @@
 #!/bin/bash
-# Source this file: 'source source_env.sh'
+# Source this file from anywhere: 'source scripts/source_env.sh'
 
-ROOT_DIR="$(pwd)"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ROOT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 export DEVSTACK_ENV_FILE="$ROOT_DIR/devstack_env"
 
 if [[ -f "$DEVSTACK_ENV_FILE" ]]; then
@@ -9,7 +10,7 @@ if [[ -f "$DEVSTACK_ENV_FILE" ]]; then
     source "$DEVSTACK_ENV_FILE"
     echo "Environment loaded from $DEVSTACK_ENV_FILE"
 else
-    echo "No devstack_env file found in $ROOT_DIR"
+    echo "No devstack_env file found at $DEVSTACK_ENV_FILE"
 fi
 
 # Define standard SSH options to match scripts

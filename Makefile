@@ -1,20 +1,25 @@
-# Convenience entry points. The canonical flow is still XX_RUN_FROM_SNAPSHOT.sh.
+# Convenience entry points. The canonical flow is still scripts/XX_RUN_FROM_SNAPSHOT.sh.
 SHELLCHECK ?= vendor/shellcheck
-SKOPEO     ?= ./skopeo
+SKOPEO     ?= images/skopeo
 POLICY     := ci/containers-policy.json
 
-.PHONY: help lint vendor vendor-tools run verify teardown
+.PHONY: help lint test vendor vendor-tools run verify drills teardown
 
 help:
-	@echo "make lint         bash -n + shellcheck + python compile (no lab needed)"
+	@echo "make lint         bash -n + shellcheck + python compile + unit tests + kustomize render (no lab needed)"
+	@echo "make test         token-service unit + HTTP tests only (no lab needed)"
 	@echo "make vendor       fetch the two vendored images (needs internet, once)"
 	@echo "make vendor-tools fetch shellcheck into vendor/"
 	@echo "make run          revert to PostStack_Ready and run 03-12 (needs sudo)"
 	@echo "make verify       independent read-only verification of the running lab"
+	@echo "make drills       run the three failure drills against the running lab"
 	@echo "make teardown     destroy the lab (requires --yes; see 99_teardown.sh)"
 
 lint:
 	@./ci/lint.sh
+
+test:
+	@python3 -m unittest discover -s tests -p 'test_*.py' -v
 
 vendor-tools:
 	@mkdir -p vendor
@@ -36,10 +41,13 @@ vendor:
 	@cat vendor/IMAGES.txt
 
 run:
-	sudo bash XX_RUN_FROM_SNAPSHOT.sh
+	sudo bash scripts/XX_RUN_FROM_SNAPSHOT.sh
 
 verify:
-	@./verify.sh
+	@./scripts/verify.sh
+
+drills:
+	@./scripts/XX_failure_demo.sh
 
 teardown:
-	@./99_teardown.sh
+	@./scripts/99_teardown.sh

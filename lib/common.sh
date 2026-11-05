@@ -50,7 +50,7 @@ SSH_USER="${SSH_USER:-ubuntu}"
 
     K3S_ROUTER_NAME="${K3S_ROUTER_NAME:-k3s-router}"
     IMAGE_NAME="${IMAGE_NAME:-Ubuntu24}"
-    IMAGE_PATH="${IMAGE_PATH:-$ROOT_DIR/noble-server-cloudimg-amd64.img}"
+    IMAGE_PATH="${IMAGE_PATH:-$ROOT_DIR/images/noble-server-cloudimg-amd64.img}"
     KEYPAIR_NAME="${KEYPAIR_NAME:-k3s-key}"
     WORKER_COUNT="${WORKER_COUNT:-1}"
     MASTER_NAME="${MASTER_NAME:-k3s-master-01}"
@@ -61,10 +61,11 @@ SSH_USER="${SSH_USER:-ubuntu}"
     REGISTRY_VOLUME_NAME="${REGISTRY_VOLUME_NAME:-registry-01-volume}"
     REGISTRY_VOLUME_SIZE="${REGISTRY_VOLUME_SIZE:-20}"
 
-    K3S_BINARY_PATH="${K3S_BINARY_PATH:-$ROOT_DIR/k3s}"
-    K3S_IMAGES_PATH="${K3S_IMAGES_PATH:-$ROOT_DIR/k3s-airgap-images-amd64.tar}"
-    ZOT_BINARY_PATH="${ZOT_BINARY_PATH:-$ROOT_DIR/zot-linux-amd64}"
+    K3S_BINARY_PATH="${K3S_BINARY_PATH:-$ROOT_DIR/images/k3s}"
+    K3S_IMAGES_PATH="${K3S_IMAGES_PATH:-$ROOT_DIR/images/k3s-airgap-images-amd64.tar}"
+    ZOT_BINARY_PATH="${ZOT_BINARY_PATH:-$ROOT_DIR/images/zot-linux-amd64}"
     KUBECONFIG_PATH="${KUBECONFIG_PATH:-$ROOT_DIR/k3s-kubeconfig.yaml}"
+    K8S_DIR="${K8S_DIR:-$ROOT_DIR/k8s}"
 }
 
 log() {
@@ -100,6 +101,17 @@ persist_env() {
     touch "$DEVSTACK_ENV_FILE"
     sed -i "/^export ${key}=.*/d" "$DEVSTACK_ENV_FILE"
     printf 'export %s=%q\n' "$key" "$value" >> "$DEVSTACK_ENV_FILE"
+}
+
+# Render a kustomization and apply it. The only run-specific value is the
+# registry address (it changes on every rebuild), so the overlay keeps the
+# literal REGISTRY_PLACEHOLDER and it is substituted at render time.
+k8s_apply() {
+    local dir="$1"
+    local registry="$2"
+    kubectl --kubeconfig "$KUBECONFIG_PATH" kustomize "$dir" \
+        | sed "s|REGISTRY_PLACEHOLDER|${registry}|g" \
+        | kubectl --kubeconfig "$KUBECONFIG_PATH" apply -f -
 }
 
 vm_ssh() {
