@@ -58,7 +58,7 @@ git clone <repo-url> && cd final
 make vendor            # one-time, needs internet: the two demo images
 make vendor-tools      # one-time, needs internet: shellcheck for `make lint`
 
-sudo bash XX_RUN_FROM_SNAPSHOT.sh   # revert + reset + steps 03-12 (~20 min)
+sudo bash XX_RUN_FROM_SNAPSHOT.sh   # revert + reset + steps 03-12 (~7 min here)
 make verify                         # independent, read-only checks
 
 source devstack_env
@@ -320,7 +320,7 @@ broken deployment, so it re-derives everything from the live system:
 | `10_registry_smoke_test.sh` T1-T7 + catalog | all PASS |
 | `11.log` / `12.log` `docker.io` occurrences | 0 / 0 |
 | `./verify.sh` | 18 passed, 0 failed |
-| `XX_RUN_FROM_SNAPSHOT.sh` from `PostStack_Ready` | see §9 note; re-run after the last `09` fix |
+| clean `XX_RUN_FROM_SNAPSHOT.sh` from `PostStack_Ready` | `EXIT=0`, steps 03-12 all green (6 min 19 s), followed by 18/0 on `verify.sh` |
 
 ---
 
@@ -399,7 +399,8 @@ their fixes are in **[NETWORKING.md](NETWORKING.md)**.
 | token service unit tests (22 pure-function + 7 HTTP) | 22/22, 7/7 pass |
 | `verify.sh` on the pre-hardening lab | 17 passed, 1 failed — caught a pull-only token accepted on push |
 | `verify.sh` on the hardened lab | 18 passed, 0 failed |
-| clean `XX_RUN_FROM_SNAPSHOT.sh` from `PostStack_Ready` | recorded after the final run (§7) |
+| clean `XX_RUN_FROM_SNAPSHOT.sh` from `PostStack_Ready` | `EXIT=0` in 6 min 19 s: 03-12 all green, T1-T7 pass, both apps 200, `verify.sh` 18/0 afterwards |
+| `hosts.toml` written by that run's `09` | contains the `http://` fallback, so the pod pulled through the authenticated registry on the first try |
 
 ---
 
